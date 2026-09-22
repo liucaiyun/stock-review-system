@@ -40,6 +40,8 @@ public class WatchStock {
     private Double costPrice;
     /** 成本金额 = 份额 × 成本价 */
     private Double costAmount;
+    /** 个性化纪律线幅度（百分比，如 8 表示 -8%）。null = 用默认 -8% */
+    private Double stopPct;
 
     private Integer sortOrder;
 
@@ -78,6 +80,8 @@ public class WatchStock {
     public void setCostPrice(Double costPrice) { this.costPrice = costPrice; }
     public Double getCostAmount() { return costAmount; }
     public void setCostAmount(Double costAmount) { this.costAmount = costAmount; }
+    public Double getStopPct() { return stopPct; }
+    public void setStopPct(Double stopPct) { this.stopPct = stopPct; }
     public Integer getSortOrder() { return sortOrder; }
     public void setSortOrder(Integer sortOrder) { this.sortOrder = sortOrder; }
     public LocalDateTime getCreatedAt() { return createdAt; }

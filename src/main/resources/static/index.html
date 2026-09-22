@@ -292,6 +292,11 @@
       <div><label>成本价</label><input id="pCost" type="number" min="0" step="0.001" placeholder="每股成本" oninput="recalcPositionCost()"></div>
       <div><label>成本金额</label><input id="pCostAmt" type="number" min="0" step="0.01" placeholder="数量 × 成本价" oninput="recalcPositionPrice()"></div>
     </div>
+    <div class="row">
+      <div><label>纪律线幅度%（留空=默认 -8）</label><input id="pStopPct" type="number" min="0.5" max="90" step="0.5" placeholder="8 表示 -8%" title="跌破 成本×(1-幅度/100) 记破线事件。高波动ETF可放宽，慢股可收紧"></div>
+      <div></div>
+      <div></div>
+    </div>
     <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
       <button class="btn" onclick="savePosition()" id="pSaveBtn">💾 保存持仓</button>
       <button class="btn secondary" onclick="resetPosition()">清空</button>
@@ -326,7 +331,7 @@
       <table>
         <thead><tr>
           <th>代码</th><th>名称</th><th>行业层级</th><th>相对板块</th><th>数量</th><th>成本价</th><th>成本额</th>
-          <th>现价</th><th>涨跌幅</th><th>市值</th><th>浮动盈亏</th><th>盈亏%</th><th>纪律线(-8%)</th><th>仓位</th><th>计划</th><th>操作</th>
+          <th>现价</th><th>涨跌幅</th><th>市值</th><th>浮动盈亏</th><th>盈亏%</th><th>纪律线</th><th>仓位</th><th>计划</th><th>操作</th>
         </tr></thead>
         <tbody id="posBody"></tbody>
       </table>
@@ -338,8 +343,9 @@
         <button class="btn secondary sm" onclick="loadDiscipline(true)">扫描破线</button>
       </div>
     </h2>
-    <p class="hint" style="margin-top:0;">跌破 -8% 纪律线会记一条事件。破线后你只有两个选择：「执行止损」或「标记硬抗」——纪律执行率只统计做过选择的事件。硬抗平均多亏多少，统计图页有数。</p>
+    <p class="hint" style="margin-top:0;">跌破纪律线（默认 -8%，可在持仓表单里按只设置幅度）会记一条事件。破线后你只有两个选择：「执行止损」或「标记硬抗」——纪律执行率只统计做过选择的事件。硬抗结局分布（越扛越亏 vs 熬回涨回）和硬抗中的实时代价会在下方展示。</p>
     <div class="kpis" id="discKpi"></div>
+    <p class="hint" id="discHardOutcome" style="margin:4px 0 0;"></p>
     <div class="table-wrap" style="margin-top:12px;">
       <table>
         <thead><tr>
@@ -353,7 +359,7 @@
   <div class="grid2">
     <div class="card">
       <h2>做T计算器</h2>
-      <p class="hint" style="margin-top:0;">先买后卖（正T）或先卖后买（反T）摊低成本。参考位取自最新K线。</p>
+      <p class="hint" style="margin-top:0;">先买后卖（正T）或先卖后买（反T）摊低成本。参考位取自最新K线。结果已扣手续费：股票收佣金+印花税+过户费，ETF 免印花税/过户费只收佣金（按代码自动识别）。</p>
       <div class="row">
         <div><label>代码</label><input id="ttCode" placeholder="601138" onkeydown="if(event.key==='Enter')loadTtLevels()"></div>
         <div><label>&nbsp;</label><button class="btn secondary sm" style="width:100%" onclick="loadTtLevels()">拉参考位</button></div>
@@ -362,6 +368,10 @@
       <div class="row">
         <div><label>持仓数量</label><input id="ttShares" type="number" step="100"></div>
         <div><label>成本价</label><input id="ttCost" type="number" step="0.001"></div>
+      </div>
+      <div class="row">
+        <div><label>佣金率%（双边）</label><input id="ttFeeRate" type="number" step="0.005" min="0" value="0.025" title="按你券商的实际费率填，万2.5 填 0.025"></div>
+        <div><label>最低佣金（元/笔）</label><input id="ttFeeMin" type="number" step="0.5" min="0" value="5" title="很多券商单笔最低收 5 元，小资金做T要特别小心这一条；部分券商 ETF 无最低收费"></div>
       </div>
       <div class="row">
         <div><label>买入价</label><input id="ttBuyPrice" type="number" step="0.001"></div>

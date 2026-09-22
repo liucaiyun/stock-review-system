@@ -27,6 +27,9 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class WatchlistService {
 
+    /** 默认纪律线幅度：-8% */
+    public static final double DEFAULT_STOP_PCT = 8.0;
+
     private final WatchStockRepository watchStockRepository;
     private final QuoteClient quoteClient;
     private final TradePlanRepository tradePlanRepository;
@@ -84,6 +87,10 @@ public class WatchlistService {
         exist.setMarket(incoming.getMarket());
         exist.setSecid(incoming.getSecid());
         exist.setNotes(incoming.getNotes());
+        // 自选页编辑：填了才更新纪律线，留空保留原值（持仓页保存则以表单为准）
+        if (req.getStopPct() != null) {
+            exist.setStopPct(normalizeStopPct(req.getStopPct()));
+        }
         // 自选页不传份额时保留已录入持仓，避免被清空
         if (req.getShares() != null || req.getCostPrice() != null || req.getCostAmount() != null) {
             applyPosition(exist, req);
@@ -98,6 +105,7 @@ public class WatchlistService {
     public WatchStock upsertPosition(WatchSaveRequest req) {
         WatchStock incoming = buildManual(req);
         applyPosition(incoming, req);
+        incoming.setStopPct(normalizeStopPct(req.getStopPct()));
         if (incoming.getShares() == null || incoming.getShares() <= 0) {
             throw new IllegalArgumentException("请填写持仓数量");
         }
@@ -129,6 +137,8 @@ public class WatchlistService {
         exist.setShares(incoming.getShares());
         exist.setCostPrice(incoming.getCostPrice());
         exist.setCostAmount(incoming.getCostAmount());
+        // 持仓页保存时始终以表单值为准（留空 = 恢复默认 -8%）
+        exist.setStopPct(normalizeStopPct(req.getStopPct()));
         return watchStockRepository.save(exist);
     }
 
@@ -452,6 +462,7 @@ public class WatchlistService {
         }
         stock.setName(name.isEmpty() ? parsed.code() : name);
         stock.setNotes(req.getNotes());
+        stock.setStopPct(normalizeStopPct(req.getStopPct()));
         applyPosition(stock, req);
         return stock;
     }
@@ -516,9 +527,11 @@ public class WatchlistService {
         if (row.getFloatPl() != null && row.getCostAmount() != null && row.getCostAmount() != 0) {
             row.setFloatPlPct(round2(row.getFloatPl() / row.getCostAmount() * 100));
         }
-        // 纪律止损线：成本价 × 0.92（-8% 硬止损纪律）
+        // 纪律止损线：成本价 × (1 - 幅度/100)，幅度默认 8（-8%），可按持仓单独设置
         if (s.getCostPrice() != null && s.getCostPrice() > 0) {
-            double stopLine = Math.round(s.getCostPrice() * 0.92 * 1000) / 1000.0;
+            double pct = s.getStopPct() == null ? DEFAULT_STOP_PCT : s.getStopPct();
+            double stopLine = Math.round(s.getCostPrice() * (1 - pct / 100) * 1000) / 1000.0;
+            row.setStopPct(pct);
             row.setStopLine(stopLine);
             if (row.getPrice() != null) {
                 row.setStopBroken(row.getPrice() < stopLine);
@@ -663,6 +676,17 @@ public class WatchlistService {
                 .filter(s -> raw.equals(s.name()) || raw.equalsIgnoreCase(s.code()))
                 .findFirst()
                 .orElse(suggests.get(0));
+    }
+
+    /** 纪律线幅度校验：空 = 用默认；否则限制在 0.5 ~ 90 之间 */
+    private static Double normalizeStopPct(Double pct) {
+        if (pct == null) {
+            return null;
+        }
+        if (pct < 0.5 || pct > 90) {
+            throw new IllegalArgumentException("纪律线幅度需在 0.5 ~ 90 之间（填 8 表示 -8%）");
+        }
+        return pct;
     }
 
     private static double round2(double v) {

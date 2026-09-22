@@ -17,8 +17,10 @@ public class PositionRow {
     private Double floatPl;
     private Double floatPlPct;
     private Double weight;
-    /** 纪律止损线 = 成本价 × 0.92（-8%） */
+    /** 纪律止损线 = 成本价 × (1 - stopPct/100)，默认 -8% */
     private Double stopLine;
+    /** 本只生效的纪律线幅度（%），默认 8 */
+    private Double stopPct;
     /** 现价是否已跌破纪律止损线 */
     private Boolean stopBroken;
     /** 现价相对纪律止损线的距离%，正数=仍在线上方 */
@@ -63,6 +65,8 @@ public class PositionRow {
     public void setWeight(Double weight) { this.weight = weight; }
     public Double getStopLine() { return stopLine; }
     public void setStopLine(Double stopLine) { this.stopLine = stopLine; }
+    public Double getStopPct() { return stopPct; }
+    public void setStopPct(Double stopPct) { this.stopPct = stopPct; }
     public Boolean getStopBroken() { return stopBroken; }
     public void setStopBroken(Boolean stopBroken) { this.stopBroken = stopBroken; }
     public Double getStopDistancePct() { return stopDistancePct; }

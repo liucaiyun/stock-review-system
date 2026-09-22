@@ -10,6 +10,8 @@ public class WatchSaveRequest {
     private Double costPrice;
     /** 成本金额，可手填；不填则按份额×成本价计算 */
     private Double costAmount;
+    /** 个性化纪律线幅度（百分比，如 8 表示 -8%）。空 = 用默认 -8% */
+    private Double stopPct;
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
@@ -25,4 +27,6 @@ public class WatchSaveRequest {
     public void setCostPrice(Double costPrice) { this.costPrice = costPrice; }
     public Double getCostAmount() { return costAmount; }
     public void setCostAmount(Double costAmount) { this.costAmount = costAmount; }
+    public Double getStopPct() { return stopPct; }
+    public void setStopPct(Double stopPct) { this.stopPct = stopPct; }
 }

@@ -14,14 +14,19 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-/** 止损纪律闭环：破 -8% 线记事件 → 执行/硬抗/涨回/清仓 → 统计纪律执行率 */
+/** 止损纪律闭环：破纪律线记事件 → 执行/硬抗/涨回/清仓 → 统计纪律执行率与硬抗结局分布 */
 @Service
 public class DisciplineService {
 
-    public static final double STOP_PCT = 0.92; // 成本 × 0.92 = -8% 纪律线
+    private static final Logger log = LoggerFactory.getLogger(DisciplineService.class);
+
+    /** 默认纪律线幅度：-8%（可按持仓单独覆盖，见 WatchStock.stopPct） */
+    public static final double DEFAULT_STOP_PCT = 8.0;
 
     private final DisciplineEventRepository repository;
     private final WatchlistService watchlistService;
@@ -61,7 +66,9 @@ public class DisciplineService {
                         quotes.put(q.code(), q);
                     }
                 }
-            } catch (Exception ignored) {
+            } catch (Exception ex) {
+                // 行情拉取失败不能静默跳过：纪律扫描漏扫比误报更危险
+                log.warn("纪律扫描拉取行情失败，本次可能漏扫：{}", ex.getMessage());
             }
         }
         int created = 0;
@@ -76,7 +83,7 @@ public class DisciplineService {
             QuoteSnapshot q = quotes.get(s.getCode());
             Double price = q == null ? null : q.price();
             if (holding && price != null) {
-                double stopLine = s.getCostPrice() * STOP_PCT;
+                double stopLine = stopLineOf(s);
                 if (price < stopLine && open == null) {
                     DisciplineEvent ev = new DisciplineEvent();
                     ev.setCode(s.getCode());
@@ -157,6 +164,68 @@ public class DisciplineService {
         return null;
     }
 
+    /** 某只持仓的纪律线 = 成本价 × (1 - 幅度/100)，幅度默认 -8% */
+    private static double stopLineOf(WatchStock s) {
+        double pct = s.getStopPct() == null ? DEFAULT_STOP_PCT : s.getStopPct();
+        return s.getCostPrice() * (1 - pct / 100);
+    }
+
+    /**
+     * 待处理（硬抗中）事件的实时代价：现价相对破线时价又跌了多少。
+     * 正数 = 硬抗期间继续亏（越扛越亏），负数 = 已经收复一部分。
+     */
+    public List<Map<String, Object>> openLive() {
+        List<DisciplineEvent> open = openEvents();
+        if (open.isEmpty()) {
+            return List.of();
+        }
+        Map<String, QuoteSnapshot> quotes = new HashMap<>();
+        List<String> secids = new ArrayList<>();
+        for (DisciplineEvent ev : open) {
+            try {
+                var stock = watchlistService.findLocal(ev.getCode());
+                if (stock != null && stock.getSecid() != null && !stock.getSecid().isBlank()) {
+                    secids.add(stock.getSecid());
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        if (!secids.isEmpty()) {
+            try {
+                for (QuoteSnapshot q : quoteClient.fetchQuotes(secids)) {
+                    if (q != null && q.code() != null) {
+                        quotes.put(q.code(), q);
+                    }
+                }
+            } catch (Exception ex) {
+                log.warn("硬抗实时代价拉取行情失败：{}", ex.getMessage());
+            }
+        }
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (DisciplineEvent ev : open) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", ev.getId());
+            m.put("code", ev.getCode());
+            m.put("name", ev.getName());
+            m.put("triggerDate", ev.getTriggerDate());
+            m.put("triggerPrice", ev.getTriggerPrice());
+            m.put("stopLine", ev.getStopLine());
+            QuoteSnapshot q = quotes.get(ev.getCode());
+            Double price = q == null ? null : q.price();
+            m.put("currentPrice", price);
+            if (price != null && ev.getTriggerPrice() != null && ev.getTriggerPrice() > 0) {
+                double live = (ev.getTriggerPrice() - price) / ev.getTriggerPrice() * 100;
+                m.put("liveExtraLossPct", round(live, 2));
+                m.put("liveExtraLossTrend", live > 0 ? "worse" : "better");
+            }
+            if (ev.getTriggerDate() != null) {
+                m.put("daysHeld", (int) Math.max(0, ChronoUnit.DAYS.between(ev.getTriggerDate(), LocalDate.now())));
+            }
+            out.add(m);
+        }
+        return out;
+    }
+
     /** 纪律统计：执行率 = 执行 / (执行 + 硬抗)，另统计硬抗平均多拖几天、多亏几个点 */
     public Map<String, Object> summary() {
         List<DisciplineEvent> all = list();
@@ -202,6 +271,30 @@ public class DisciplineService {
         out.put("avgExecutedDays", executed == 0 ? null : round(executedDaysSum * 1.0 / executed, 1));
         out.put("avgIgnoredDays", ignored == 0 ? null : round(ignoredDaysSum * 1.0 / ignored, 1));
         out.put("avgIgnoredExtraLoss", ignoredLossN == 0 ? null : round(ignoredLossSum / ignoredLossN, 2));
+        // 硬抗结局分布：标记硬抗且已了结的事件里，越扛越亏 vs 熬回涨回的比例与幅度
+        int worseN = 0, betterN = 0;
+        double worseSum = 0, betterSum = 0;
+        for (DisciplineEvent ev : all) {
+            if (!"IGNORED".equals(ev.getStatus()) || ev.getExtraLossPct() == null) {
+                continue;
+            }
+            double v = ev.getExtraLossPct();
+            if (v > 0) {
+                worseN++;
+                worseSum += v;
+            } else {
+                betterN++;
+                betterSum += v; // 负数 = 收复
+            }
+        }
+        Map<String, Object> hardOutcome = new LinkedHashMap<>();
+        hardOutcome.put("resolved", worseN + betterN);
+        hardOutcome.put("worseCount", worseN);
+        hardOutcome.put("recoverCount", betterN);
+        hardOutcome.put("worseRate", (worseN + betterN) == 0 ? null : round(worseN * 100.0 / (worseN + betterN), 1));
+        hardOutcome.put("avgWorseLoss", worseN == 0 ? null : round(worseSum / worseN, 2));
+        hardOutcome.put("avgRecoverGain", betterN == 0 ? null : round(betterSum / betterN, 2));
+        out.put("hardOutcome", hardOutcome);
         return out;
     }
 

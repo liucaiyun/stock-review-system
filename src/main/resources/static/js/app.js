@@ -1108,8 +1108,8 @@ async function loadPositions(refresh) {
       const broken = list.filter(p => p.stopBroken);
       if (broken.length) {
         html += '<div class="alert bad" style="margin-top:12px;">🚨 '
-          + broken.map(p => (p.name || p.code) + '（' + signPct(p.floatPlPct) + '，纪律线 ' + fmt(p.stopLine, 3) + '）').join('、')
-          + ' 已跌破 -8% 纪律止损线。按纪律应离场复盘，不要硬抗。</div>';
+          + broken.map(p => (p.name || p.code) + '（' + signPct(p.floatPlPct) + '，纪律线 -' + (p.stopPct || 8) + '%）').join('、')
+          + ' 已跌破纪律止损线。按纪律应离场复盘，不要硬抗。</div>';
       }
       if (d.topSectorWeight != null && d.topSectorWeight >= 50) {
         html += '<div class="alert warn">⚠️ 「' + d.topSector + '」占持仓市值 ' + d.topSectorWeight.toFixed(1)
@@ -1140,7 +1140,8 @@ async function loadPositions(refresh) {
       const plCell = p.floatPl == null ? '-' : ((p.floatPl < 0 ? '亏 ' : (p.floatPl > 0 ? '赚 ' : '')) + fmt(Math.abs(p.floatPl)));
       const stopCell = p.stopLine == null ? '-' : (p.stopBroken
         ? '<span class="down"><strong>已破线 ' + fmt(p.stopLine, 3) + '</strong></span>'
-        : fmt(p.stopLine, 3) + ' <span class="sub">' + (p.stopDistancePct == null ? '' : '距线 ' + p.stopDistancePct.toFixed(1) + '%') + '</span>');
+        : fmt(p.stopLine, 3) + ' <span class="sub">-' + (p.stopPct || 8) + '%'
+          + (p.stopDistancePct == null ? '' : ' · 距线 ' + p.stopDistancePct.toFixed(1) + '%') + '</span>');
       return '<tr' + (p.stopBroken ? ' class="stop-broken"' : '') + '><td><a onclick="openStrategy(\'' + p.code + '\')">' + p.code + '</a></td>'
         + '<td>' + (p.name || '') + '</td>'
         + '<td>' + renderBoardPath(p.boardPath, p.region) + '</td>'
@@ -1194,10 +1195,13 @@ async function loadDiscipline(scan) {
   if (!kpi || !body) return;
   try {
     await postJSON('/api/discipline/scan', {});
-    const [summary, events] = await Promise.all([
+    const [summary, events, openLive] = await Promise.all([
       getJSON('/api/discipline/summary'),
-      getJSON('/api/discipline/events')
+      getJSON('/api/discipline/events'),
+      getJSON('/api/discipline/open-live')
     ]);
+    const liveMap = {};
+    (openLive || []).forEach(lv => { liveMap[lv.id] = lv; });
     kpi.innerHTML =
       kpiHtml(summary.open || 0, '待处理')
       + '<div class="kpi"><div class="v ' + (summary.executeRate == null ? '' : (summary.executeRate >= 60 ? 'up' : 'down')) + '">'
@@ -1206,6 +1210,16 @@ async function loadDiscipline(scan) {
       + '<div class="kpi"><div class="v ' + (summary.avgIgnoredExtraLoss > 0 ? 'down' : '') + '">'
       + (summary.avgIgnoredExtraLoss == null ? '-' : summary.avgIgnoredExtraLoss + '%') + '</div><div class="l">硬抗平均多亏</div></div>'
       + kpiHtml(summary.recovered || 0, '涨回线上（运气）');
+    // 硬抗结局分布：越扛越亏 vs 熬回涨回
+    const ho = summary.hardOutcome || {};
+    const hoBox = document.getElementById('discHardOutcome');
+    if (hoBox) {
+      hoBox.innerHTML = ho.resolved > 0
+        ? '硬抗结局分布：已了结的 ' + ho.resolved + ' 次硬抗里，<span class="down">' + ho.worseCount + ' 次越扛越亏（平均多亏 '
+          + ho.avgWorseLoss + '%）</span>，<span class="up">' + ho.recoverCount + ' 次熬了回来（平均收复 '
+          + Math.abs(ho.avgRecoverGain || 0) + '%）</span>。熬回来的比例越高越要警惕——那是运气，不是能力，下一次可能就是深套。'
+        : '';
+    }
     if (!events || !events.length) {
       body.innerHTML = '<tr><td colspan="11" class="empty">还没有破线事件，继续保持</td></tr>';
       return;
@@ -1215,7 +1229,18 @@ async function loadDiscipline(scan) {
       const acts = ev.status === 'OPEN'
         ? '<a onclick="resolveEvent(' + ev.id + ',\'EXECUTED\')">执行止损</a> · <a class="danger" onclick="resolveEvent(' + ev.id + ',\'IGNORED\')">硬抗</a>'
         : (ev.note ? '<span class="sub">' + escHtml(ev.note) + '</span>' : '-');
-      const extra = ev.extraLossPct == null ? '-' : '<span class="' + (ev.extraLossPct > 0 ? 'down' : 'up') + '">' + signPct(ev.extraLossPct) + '</span>';
+      const lv = liveMap[ev.id];
+      let extra;
+      if (ev.status === 'OPEN') {
+        if (lv && lv.liveExtraLossPct != null) {
+          extra = '<span class="' + (lv.liveExtraLossPct > 0 ? 'down' : 'up') + '">' + signPct(lv.liveExtraLossPct)
+            + '</span> <span class="tag ' + (lv.liveExtraLossPct > 0 ? 'watch' : 'hit') + '">硬抗中' + (lv.daysHeld != null ? ' ' + lv.daysHeld + ' 天' : '') + '</span>';
+        } else {
+          extra = '<span class="tag watch">硬抗中</span>';
+        }
+      } else {
+        extra = ev.extraLossPct == null ? '-' : '<span class="' + (ev.extraLossPct > 0 ? 'down' : 'up') + '">' + signPct(ev.extraLossPct) + '</span>';
+      }
       return '<tr><td>' + (ev.triggerDate || '') + '</td>'
         + '<td><a onclick="openStrategy(\'' + ev.code + '\')">' + ev.code + '</a></td>'
         + '<td>' + (ev.name || '') + '</td>'
@@ -1224,7 +1249,7 @@ async function loadDiscipline(scan) {
         + '<td>' + fmt(ev.triggerPrice, 3) + '</td>'
         + '<td><span class="tag ' + st[1] + '">' + st[0] + '</span></td>'
         + '<td>' + (ev.resolvedDate || '-') + '</td>'
-        + '<td>' + (ev.daysOpen == null ? '-' : ev.daysOpen + ' 天') + '</td>'
+        + '<td>' + (ev.status === 'OPEN' && lv && lv.daysHeld != null ? lv.daysHeld + ' 天' : (ev.daysOpen == null ? '-' : ev.daysOpen + ' 天')) + '</td>'
         + '<td>' + extra + '</td>'
         + '<td>' + acts + '</td></tr>';
     }).join('');
@@ -1337,29 +1362,56 @@ function calcT() {
   const bs = numOrNull('ttBuyShares') || 0;
   const sp = numOrNull('ttSellPrice');
   const ss = numOrNull('ttSellShares') || 0;
+  const code = document.getElementById('ttCode').value.trim();
+  const rateIn = numOrNull('ttFeeRate');
+  const feeRate = (rateIn == null ? 0.025 : rateIn) / 100;
+  const minIn = numOrNull('ttFeeMin');
+  const feeMin = minIn == null ? 5 : minIn;
   const box = document.getElementById('ttResult');
   if (shares <= 0 || cost <= 0) { box.innerHTML = '先填持仓数量和成本价（或点「从持仓带入」）。'; return; }
   if ((bs > 0 && bp == null) || (ss > 0 && sp == null)) { box.innerHTML = '买卖价格要填完整。'; return; }
-  const costAmt = shares * cost;
+  // ETF（沪 5xxxxx / 深 15、16、18 开头）免印花税和过户费，只收佣金
+  const isEtf = /^5|^1[568]/.test(code);
   const buyAmt = bs * (bp || 0);
   const sellAmt = ss * (sp || 0);
+  const buyComm = buyAmt > 0 ? Math.max(buyAmt * feeRate, feeMin) : 0;
+  const sellComm = sellAmt > 0 ? Math.max(sellAmt * feeRate, feeMin) : 0;
+  const stampTax = isEtf ? 0 : sellAmt * 0.0005;      // 印花税 0.05%，仅卖出、仅股票
+  const transferFee = isEtf ? 0 : (buyAmt + sellAmt) * 0.00001; // 过户费 0.001%，双边、仅股票
+  const totalFee = Math.round((buyComm + sellComm + stampTax + transferFee) * 100) / 100;
+  const costAmt = shares * cost;
   const newShares = shares + bs - ss;
   if (newShares < 0) { box.innerHTML = '卖出数量超过总持仓了。'; return; }
   if (newShares === 0) {
-    const pl = sellAmt - costAmt - buyAmt;
-    box.innerHTML = '全部卖完了。本次总盈亏 <b class="' + (pl >= 0 ? 'pos' : 'neg') + '">' + fmt(pl) + '</b> 元。';
+    const pl = sellAmt - costAmt - buyAmt - totalFee;
+    box.innerHTML = '全部卖完了。本次总盈亏（已扣手续费 ' + fmt(totalFee) + ' 元）<b class="' + (pl >= 0 ? 'pos' : 'neg') + '">' + fmt(pl) + '</b> 元。';
     return;
   }
-  const newCost = (costAmt + buyAmt - sellAmt) / newShares;
+  // 手续费计入摊成本：真金白银付出的费用会抬高/摊低实际成本
+  const newCost = (costAmt + buyAmt - sellAmt + totalFee) / newShares;
   const drop = cost - newCost;
-  // 配对做T部分的真实差价收益
   const pairShares = Math.min(bs, ss);
-  const tProfit = pairShares > 0 && bp != null && sp != null ? (sp - bp) * pairShares : null;
+  const grossT = pairShares > 0 && bp != null && sp != null ? (sp - bp) * pairShares : null;
+  const netT = grossT == null ? null : grossT - totalFee;
+  const feeDetail = '手续费合计 <b>' + fmt(totalFee) + '</b> 元（佣金 ' + fmt(buyComm + sellComm)
+    + (isEtf ? '，ETF 免印花税/过户费' : ' + 印花税 ' + fmt(stampTax) + ' + 过户费 ' + fmt(transferFee)) + '）';
+  let tPart = '';
+  if (grossT != null) {
+    tPart = '<br>配对做T ' + fmt(pairShares, 0) + ' 股：差价毛收益 <b>' + fmt(grossT) + '</b> 元，扣费后净收益 <b class="' + (netT >= 0 ? 'pos' : 'neg') + '">' + fmt(netT) + '</b> 元'
+      + '<br>' + feeDetail;
+    if (netT < 0) {
+      tPart += '<br><span class="neg">⚠️ 价差不够付手续费，这趟T是白做，不如不动。</span>';
+    } else if (grossT > 0 && totalFee / grossT > 0.3) {
+      tPart += '<br><span class="neg">⚠️ 手续费吃掉了差价的 ' + (totalFee / grossT * 100).toFixed(0) + '%，价差偏薄，慎做。</span>';
+    }
+  } else {
+    tPart = '<br>' + feeDetail;
+  }
   box.innerHTML =
-    '新持仓 <b>' + fmt(newShares, 0) + '</b> 股，新成本 <b>' + newCost.toFixed(3) + '</b> 元'
-    + '（原 ' + cost.toFixed(3) + '，' + (drop >= 0 ? '降 <span class="pos">' + drop.toFixed(3) : '升 <span class="neg">' + Math.abs(drop).toFixed(3)) + '</span> 元/股）'
-    + (tProfit != null ? '<br>本次配对做T ' + fmt(pairShares, 0) + ' 股，差价收益 <b class="' + (tProfit >= 0 ? 'pos' : 'neg') + '">' + fmt(tProfit) + '</b> 元（未扣手续费）' : '')
-    + '<br><span class="hint" style="margin:0">提示：卖出数量超过买入数量的部分按减仓算，会直接兑现盈亏。</span>';
+    '新持仓 <b>' + fmt(newShares, 0) + '</b> 股，新成本 <b>' + newCost.toFixed(3) + '</b> 元（含手续费，原 ' + cost.toFixed(3)
+    + '，' + (drop >= 0 ? '降 <span class="pos">' + drop.toFixed(3) : '升 <span class="neg">' + Math.abs(drop).toFixed(3)) + '</span> 元/股）'
+    + tPart
+    + '<br><span class="hint" style="margin:0">提示：卖出超过买入的部分按减仓算，会直接兑现盈亏。佣金率按你券商实际值改（默认万2.5、单笔最低5元）；ETF 按代码自动识别，免印花税和过户费。</span>';
 }
 
 /* ---------- 仓位计算器（P1-6） ---------- */
@@ -1402,10 +1454,11 @@ function resetPosition() {
   document.getElementById('pShares').value = '';
   document.getElementById('pCost').value = '';
   document.getElementById('pCostAmt').value = '';
+  document.getElementById('pStopPct').value = '';
   document.getElementById('pSaveBtn').textContent = '💾 保存持仓';
 }
 
-function openPosition(id, code, name, shares, costPrice, notes) {
+function openPosition(id, code, name, shares, costPrice, notes, stopPct) {
   show('position');
   resetPosition();
   if (id) document.getElementById('pId').value = id;
@@ -1414,6 +1467,7 @@ function openPosition(id, code, name, shares, costPrice, notes) {
   document.getElementById('pNotes').value = notes || '';
   if (shares != null) document.getElementById('pShares').value = shares;
   if (costPrice != null) document.getElementById('pCost').value = costPrice;
+  if (stopPct != null) document.getElementById('pStopPct').value = stopPct;
   recalcPositionCost();
   if (id) document.getElementById('pSaveBtn').textContent = '💾 保存修改';
   document.getElementById('pShares').focus();
@@ -1422,7 +1476,7 @@ function openPosition(id, code, name, shares, costPrice, notes) {
 function editPosition(id) {
   const p = (positionCache || []).find(x => x.id === id);
   if (!p) return;
-  openPosition(p.id, p.code, p.name, p.shares, p.costPrice, p.notes);
+  openPosition(p.id, p.code, p.name, p.shares, p.costPrice, p.notes, p.stopPct);
 }
 
 async function savePosition() {
@@ -1432,7 +1486,8 @@ async function savePosition() {
     notes: document.getElementById('pNotes').value.trim(),
     shares: numOrNull('pShares'),
     costPrice: numOrNull('pCost'),
-    costAmount: numOrNull('pCostAmt')
+    costAmount: numOrNull('pCostAmt'),
+    stopPct: numOrNull('pStopPct')
   };
   if (!body.code) { toast('请填写股票代码', 'warn'); return; }
   if (body.shares == null || body.shares <= 0) { toast('请填写持仓数量', 'warn'); return; }

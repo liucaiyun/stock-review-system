@@ -31,6 +31,12 @@ public class DisciplineController {
         return disciplineService.summary();
     }
 
+    /** 待处理（硬抗中）事件的实时代价：现价相对破线时又亏/收复多少 */
+    @GetMapping("/open-live")
+    public List<Map<String, Object>> openLive() {
+        return disciplineService.openLive();
+    }
+
     /** 扫描持仓，新建/更新破线事件 */
     @PostMapping("/scan")
     public Map<String, Object> scan() {
