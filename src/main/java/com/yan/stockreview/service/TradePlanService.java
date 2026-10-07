@@ -119,6 +119,28 @@ public class TradePlanService {
         return close(plan.getId(), note);
     }
 
+    /**
+     * 把一笔已录入的买入成交挂到已存在的计划上。
+     *
+     * <p>为什么需要它：原来「先写计划、过几天再买」这条最常见的路径没法建立联系——从成交页买入时只会
+     * **新建**一条计划（写入 buyTradeId），而早就写好的那条计划仍然挂空。结果执行偏差报表只能靠
+     * 「入场日之前 60 天内最近的一条计划」去猜配对，猜错了整张表的违规代价就都是错的。
+     */
+    @Transactional
+    public TradePlan attachTrade(Long planId, Long tradeId) {
+        TradePlan plan = tradePlanRepository.findById(planId)
+                .orElseThrow(() -> new IllegalArgumentException("计划不存在"));
+        if (tradeId == null || tradeId <= 0) {
+            throw new IllegalArgumentException("成交 id 不合法");
+        }
+        if (plan.getBuyTradeId() != null && !plan.getBuyTradeId().equals(tradeId)) {
+            throw new IllegalStateException("这条计划已经关联了另一笔成交（id=" + plan.getBuyTradeId()
+                    + "），先解除再关联");
+        }
+        plan.setBuyTradeId(tradeId);
+        return tradePlanRepository.save(plan);
+    }
+
     @Transactional
     public void delete(Long id) {
         tradePlanRepository.deleteById(id);

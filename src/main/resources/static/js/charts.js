@@ -187,8 +187,31 @@ function barChart(id, names, values, color) {
   }, true);
 }
 
-function dualBarChart(id, names, a, b, la, lb) {
+/** 带正负色的柱状图：期望值这种「可正可负」的指标要能一眼看出方向 */
+function signedBarChart(id, names, values, posColor, negColor) {
   const c = getChart(id);
+  if (!c) return;
+  c.setOption({
+    tooltip: { trigger: 'axis' },
+    grid: { left: 48, right: 16, top: 24, bottom: 48 },
+    xAxis: { type: 'category', data: names, axisLabel: { rotate: 30 } },
+    yAxis: { type: 'value', name: 'R', splitLine: { lineStyle: { type: 'dashed' } } },
+    series: [{
+      type: 'bar',
+      data: (values || []).map(v => ({
+        value: v,
+        itemStyle: { color: (v || 0) >= 0 ? (posColor || '#00a854') : (negColor || '#f53f3f') }
+      })),
+      barMaxWidth: 36,
+      markLine: {
+        silent: true, symbol: 'none',
+        data: [{ yAxis: 0, lineStyle: { color: '#86909c', type: 'solid' }, label: { show: false } }]
+      }
+    }]
+  }, true);
+}
+
+function dualBarChart(id, names, a, b, la, lb) {  const c = getChart(id);
   if (!c) return;
   c.setOption({
     tooltip: { trigger: 'axis' },
@@ -257,8 +280,8 @@ window.addEventListener('resize', () => {
   Object.values(chartPool).forEach(c => c && c.resize());
 });
 
-/** 净值曲线：我的净值 vs 沪深300（都归一到 1 起步） */
-function equityLineChart(id, dates, mine, bench) {
+/** 净值曲线：我的净值 vs 沪深300（都归一到 1 起步），出入金在图上打点标出 */
+function equityLineChart(id, dates, mine, bench, flow) {
   const c = getChart(id);
   if (!c) return;
   const series = [{
@@ -274,6 +297,21 @@ function equityLineChart(id, dates, mine, bench) {
       itemStyle: { color: '#86909c' }, lineStyle: { width: 1.4, color: '#86909c', type: 'dashed' },
       connectNulls: true
     });
+  }
+  // 出入金打点：入金/出金不是收益，标出来免得把净值跳变误读成赚钱/亏钱
+  const flows = [];
+  (flow || []).forEach((v, i) => {
+    if (v) {
+      flows.push({
+        coord: [dates[i], (mine || [])[i]],
+        value: (v > 0 ? '入金 ' : '出金 ') + fmt(Math.abs(v)),
+        itemStyle: { color: v > 0 ? '#00b42a' : '#f53f3f' },
+        label: { formatter: v > 0 ? '入金' : '出金', fontSize: 10, color: '#fff' }
+      });
+    }
+  });
+  if (flows.length) {
+    series[0].markPoint = { symbolSize: 38, data: flows, label: { show: true } };
   }
   c.setOption({
     animation: false,

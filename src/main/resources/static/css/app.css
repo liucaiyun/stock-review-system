@@ -151,6 +151,9 @@ a.danger { color: var(--red); }
 .replay-status { font-size: 12px; color: var(--text2); white-space: nowrap; }
 .digest-line { margin: 8px 0; line-height: 1.7; color: var(--text); }
 .digest-line b { color: var(--text2); font-weight: 600; margin-right: 4px; }
+.env-summary { margin-top: 12px; padding: 10px 12px; background: #f7f8fa; border-radius: 6px; line-height: 1.7; }
+.env-kpis { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
+@media (max-width: 900px) { .env-kpis { grid-template-columns: 1fr 1fr; } }
 
 /* 跌破 -8% 纪律止损线的持仓行 */
 tbody tr.stop-broken td { background: #fff1f0; }

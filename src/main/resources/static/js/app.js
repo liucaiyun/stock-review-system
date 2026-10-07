@@ -23,13 +23,17 @@ async function show(id) {
   document.getElementById(id).classList.add('active');
   if (id === 'today') loadToday();
   if (id === 'watch') loadWatch();
-  if (id === 'position') { loadPositions(); loadDiscipline(); }
+  if (id === 'position') { loadPositions(); loadDiscipline(); loadRisk(false); }
   if (id === 'plans') loadPlans();
   if (id === 'strategy') await initStrategyPicks();
   if (id === 'charts') { loadCharts(); loadEquity(); }
-  if (id === 'trades') loadTrades();
+  if (id === 'trades') { loadTrades(); loadExecution(); }
   pollAlerts();
   setTimeout(() => Object.values(chartPool || {}).forEach(c => c && c.resize()), 80);
+}
+
+if (!window.__alertPoll) {
+  window.__alertPoll = setInterval(pollAlerts, 60000);
 }
 
 /* ---------- 到价提醒横幅（P1-7） ---------- */
@@ -77,27 +81,66 @@ async function loadToday() {
   box.innerHTML = loadingHtml('拉取指数...');
   document.getElementById('todaySignals').innerHTML = loadingHtml('计算信号...');
   if (digestBox) digestBox.innerHTML = loadingHtml('生成今日摘要...');
-  const idxTask = getJSON('/api/quotes/indices').then(indices => {
-    lastIndices = indices || [];
+  const envBox = document.getElementById('envBox');
+  if (envBox) envBox.innerHTML = loadingHtml('计算周期和环境...');
+  const idxTask = getJSON('/api/quotes/indices', 12000).then(indices => {
+    lastIndices = Array.isArray(indices) ? indices : (indices && indices.data) || [];
     box.innerHTML = (lastIndices.map(idx => indexCard(idx)).join('')) || '<div class="empty">指数行情暂不可用</div>';
   }).catch(e => {
     box.innerHTML = '<div class="empty">指数加载失败：' + e.message + '</div>';
   });
-  const digTask = getJSON('/api/today/digest').then(digest => {
+  const digTask = getJSON('/api/today/digest', 15000).then(digest => {
     lastDigest = digest;
     if (digestBox) digestBox.innerHTML = renderTodayDigest(digest);
   }).catch(e => {
     if (digestBox) digestBox.innerHTML = '<div class="empty">' + e.message + '</div>';
   });
-  const sigTask = getJSON('/api/strategy/watchlist-signals').then(sigs => {
+  const sigTask = getJSON('/api/strategy/watchlist-signals', 15000).then(sigs => {
     document.getElementById('todaySignals').innerHTML = renderTodaySignals(sigs);
     renderRsBox(sigs);
   }).catch(e => {
     document.getElementById('todaySignals').innerHTML = '<div class="empty">' + e.message + '</div>';
     renderRsBox([]);
   });
-  const rvTask = getJSON('/api/reviews?date=' + date).then(fillReview).catch(e => toast(e.message, 'error'));
-  await Promise.all([idxTask, digTask, sigTask, rvTask]);
+  const rvTask = getJSON('/api/reviews?date=' + date, 8000).then(fillReview).catch(e => toast(e.message, 'error'));
+  const envTask = getJSON('/api/today/environment', 12000).then(env => {
+    if (envBox) envBox.innerHTML = renderEnvironment(env);
+  }).catch(e => {
+    if (envBox) envBox.innerHTML = '<div class="empty">环境汇总失败：' + e.message + '</div>';
+  });
+  await Promise.all([idxTask, digTask, sigTask, rvTask, envTask]);
+}
+
+function renderEnvironment(d) {
+  if (!d || d.ok === false) {
+    return '<div class="empty">' + escHtml((d && d.error) || '日K还没拉到，稍后刷新') + '</div>';
+  }
+  const trendCls = d.trend === 'BULL' ? 'up' : (d.trend === 'BEAR' ? 'down' : '');
+  const volCls = d.vol === 'HIGH' ? 'down' : '';
+  return ''
+    + '<div class="env-kpis">'
+    + envKpi(signPct(d.pct5), '5日', pctCls(d.pct5))
+    + envKpi(signPct(d.pct20), '20日', pctCls(d.pct20))
+    + envKpi(signPct(d.pct60), '60日', pctCls(d.pct60))
+    + envKpi(signPct(d.distMa20Pct), '距MA20', pctCls(d.distMa20Pct))
+    + envKpi(d.trendLabel || '-', '趋势环境', trendCls)
+    + envKpi(d.volLabel || '-', '波动', volCls)
+    + '</div>'
+    + '<div class="env-summary">'
+    + '<div class="digest-line"><b>' + escHtml(d.index || '沪深300') + '</b>　'
+    + (d.date || '') + '　收盘 ' + fmt(d.close, 2)
+    + (d.ma20 != null ? '　MA20 ' + fmt(d.ma20, 2) : '')
+    + (d.ma60 != null ? '　MA60 ' + fmt(d.ma60, 2) : '')
+    + '　' + escHtml(d.volumeLabel || '')
+    + (d.volumeRatio != null ? '（量比 ' + d.volumeRatio + '）' : '')
+    + '</div>'
+    + (d.styleNote ? '<div class="digest-line"><b>风格</b>　' + escHtml(d.styleNote) + '</div>' : '')
+    + '<div class="digest-line">' + escHtml(d.summary || '') + '</div>'
+    + '</div>';
+}
+
+function envKpi(v, l, cls) {
+  return '<div class="kpi"><div class="v ' + (cls || '') + '">' + v + '</div><div class="l">' + l + '</div></div>';
 }
 
 function sceneNames(list) {
@@ -128,11 +171,16 @@ function renderTodayDigest(d) {
   if (volHit.length) sceneBits.push(volHit.length + ' 只像放量突破：' + sceneNames(volHit));
   if (volNear.length) sceneBits.push(volNear.length + ' 只接近放量：' + sceneNames(volNear));
   const sceneLine = sceneBits.length ? sceneBits.join('。') : '自选里今天没有回踩/放量这类样子（或不在自选里）';
-  const draft = '【自动摘要】\n指数：' + indexLine + '\n计划：' + planLine + '\n情景：' + sceneLine
+  const env = d.environment || {};
+  const envLine = env.summary || '';
+  const draft = '【自动摘要】\n指数：' + indexLine
+    + (envLine ? '\n环境：' + envLine : '')
+    + '\n计划：' + planLine + '\n情景：' + sceneLine
     + '\n（情景不记买卖点，摘要只供复盘对照。）';
   return ''
     + '<p class="hint" style="margin-top:0">' + escHtml(d.disclaimer || '摘要用于复盘对照，不是买卖建议。') + '</p>'
     + '<div class="digest-line"><b>指数</b>　' + escHtml(indexLine) + '</div>'
+    + (envLine ? '<div class="digest-line"><b>环境</b>　' + escHtml(envLine) + '</div>' : '')
     + '<div class="digest-line"><b>计划</b>　' + escHtml(planLine) + '</div>'
     + '<div class="digest-line"><b>情景</b>　' + escHtml(sceneLine) + '</div>'
     + '<div style="margin-top:12px;"><button type="button" class="btn secondary sm" onclick="appendDigestToReview()">写入笔记草稿</button>'
@@ -335,6 +383,23 @@ function fallbackWatchTree(list, qmap) {
   }];
 }
 
+function applyQuotesToTree(nodes, qmap) {
+  if (!nodes || !nodes.length) return nodes;
+  return nodes.map(n => {
+    if (!n) return n;
+    if (n.type === 'stock') {
+      const q = qmap[n.code];
+      if (!q) return n;
+      return Object.assign({}, n, {
+        price: q.price != null ? q.price : n.price,
+        pctChange: q.pctChange != null ? q.pctChange : n.pctChange,
+        name: n.name || q.name
+      });
+    }
+    return Object.assign({}, n, { children: applyQuotesToTree(n.children, qmap) });
+  });
+}
+
 function paintWatch() {
   const body = document.getElementById('watchBody');
   const treeWrap = document.getElementById('watchTreeWrap');
@@ -352,7 +417,9 @@ function paintWatch() {
     }
   });
   const industryTree = (watchBoardView && watchBoardView.tree) || [];
-  watchBoardTree = industryTree.length ? industryTree : (list.length ? fallbackWatchTree(list, qmap) : []);
+  watchBoardTree = industryTree.length
+    ? applyQuotesToTree(industryTree, qmap)
+    : (list.length ? fallbackWatchTree(list, qmap) : []);
   const countEl = document.getElementById('watchCount');
   if (countEl) countEl.textContent = list.length ? '（' + list.length + '）' : '';
   if (!list.length) {
@@ -399,12 +466,15 @@ async function loadWatch() {
     watchQuotes = {};
     watchBoardView = { items: [], tree: [] };
     paintWatch();
-    getJSON('/api/watchlist/quotes').then(quotes => {
+    getJSON('/api/watchlist/quotes', 20000).then(quotes => {
       if (seq !== watchLoadSeq) return;
       watchQuotes = quoteMap(quotes);
       paintWatch();
-    }).catch(() => {});
-    getJSON('/api/watchlist/boards').then(boardView => {
+    }).catch(e => {
+      if (seq !== watchLoadSeq) return;
+      toast(e && e.message ? e.message : '现价拉取失败', 'warn');
+    });
+    getJSON('/api/watchlist/boards', 20000).then(boardView => {
       if (seq !== watchLoadSeq) return;
       watchBoardView = boardView || { items: [], tree: [] };
       paintWatch();
@@ -730,13 +800,18 @@ function renderAnalyze(d) {
   ).join('');
 
   const stats = (d.stats || []).map(s =>
-    '<tr><td>' + s.strategyName + '</td><td>' + s.buyCount + '</td><td>' + s.sellCount + '</td>'
-    + '<td>' + (s.winRate5d == null ? '-' : s.winRate5d + '%') + '</td>'
-    + '<td>' + (s.avgReturn5d == null ? '-' : s.avgReturn5d + '%') + '</td>'
-    + '<td>' + (s.winRate10d == null ? '-' : s.winRate10d + '%') + '</td>'
-    + '<td>' + (s.avgReturn10d == null ? '-' : s.avgReturn10d + '%') + '</td>'
-    + '<td>' + (s.winRate20d == null ? '-' : s.winRate20d + '%') + '</td>'
-    + '<td>' + (s.avgReturn20d == null ? '-' : s.avgReturn20d + '%') + '</td></tr>'
+    '<tr><td>' + escHtml(s.strategyName) + '</td><td>' + s.buyCount + '</td><td>' + s.sellCount + '</td>'
+    + winCell(s.d5)
+    + avgCell(s.d5, 'netAvg')
+    + avgCell(s.d5, 'grossAvg')
+    + avgCell(s.d5, 'benchAvg')
+    + avgCell(s.d5, 'excessAvg')
+    + winCell(s.d10, true)
+    + avgCell(s.d10, 'netAvg')
+    + winCell(s.d20, true)
+    + avgCell(s.d20, 'netAvg')
+    + avgCell(s.sellD5, 'netAvg')
+    + '</tr>'
   ).join('');
 
   const lessons = (d.lessons || []).map(renderLesson).join('');
@@ -791,9 +866,124 @@ function renderAnalyze(d) {
     + '<div class="grid2"><div class="card"><h2>所选策略最近一次信号</h2><div class="table-wrap"><table>'
     + '<thead><tr><th>策略</th><th>日期</th><th>方向</th><th>说明</th><th>价格</th></tr></thead><tbody>'
     + (latest || '<tr><td colspan="5" class="empty">暂无</td></tr>') + '</tbody></table></div></div>'
-    + '<div class="card"><h2>本股回测（仅所选策略）</h2><p class="hint" style="margin-top:0">买点后 N 日上涨、卖点后 N 日下跌记为胜。用来体会策略脾气，不是预测。</p>'
-    + '<div class="table-wrap"><table><thead><tr><th>策略</th><th>买点</th><th>卖点</th><th>5日胜率</th><th>5日均收益</th><th>10日胜率</th><th>10日均收益</th><th>20日胜率</th><th>20日均收益</th></tr></thead><tbody>'
-    + stats + '</tbody></table></div></div></div>';
+    + '<div class="card"><h2>本股回测（仅所选策略）</h2><p class="hint" style="margin-top:0">口径与实盘一致、故意对自己不利：'
+    + '<b>buy 信号次日开盘</b>买入、持有 N 日后卖出，已扣双边佣金/过户费/印花税/滑点（往返约 '
+    + fmt(d.tradeCostPct) + '%）；<b>卖点不做空</b>（A 股现货不能做空），只统计卖完之后跌了多少，正数=卖对了。'
+    + '「净」是扣费后，「毛」是旧口径（信号当日收盘价入场、零成本）留作对照；「超额」= 净收益 − 同期'
+    + escHtml((d.benchmark || {}).name || '沪深300') + '。样本少于 30 个不显示胜率。</p>'
+    + '<div class="table-wrap"><table><thead><tr><th>策略</th><th>买点</th><th>卖点</th>'
+    + '<th>5日净胜率/样本</th><th>5日净均值</th><th>5日毛均值(旧)</th><th>同期基准</th><th>5日超额</th>'
+    + '<th>10日净胜率</th><th>10日净均值</th><th>20日净胜率</th><th>20日净均值</th><th>卖点后5日跌幅</th>'
+    + '</tr></thead><tbody>'
+    + stats + '</tbody></table></div>'
+    + benchWarn(d) + '</div>'
+    + tradeCard(d) + '</div>';
+}
+
+/** 逐笔交易模拟：R 倍数、期望值、盈亏比、出场分布 —— 这才是「能不能赚钱」的答案 */
+function tradeCard(d) {
+  const model = d.tradeModel || {};
+  const all = (d.stats || []).map(s => {
+    const t = s.trade || {};
+    if (!t.trades) {
+      return '<tr><td>' + escHtml(s.strategyName) + '</td><td colspan="11" class="empty">这段K线上没有完成任何一笔交易</td></tr>';
+    }
+    const low = t.insufficient ? ' <span class="sub-count" title="交易数少于 ' + (model.minTrades || 30) + ' 笔，只能当参考">样本少</span>' : '';
+    return '<tr><td>' + escHtml(s.strategyName) + low + '</td>'
+      + '<td>' + t.trades + '</td>'
+      + '<td>' + (t.winRate == null ? '-' : t.winRate + '%') + '</td>'
+      + rCell(t.expectancyR, true)
+      + rCell(t.avgWinR, false)
+      + rCell(t.avgLossR, false)
+      + '<td>' + (t.profitFactor == null ? '-' : t.profitFactor) + '</td>'
+      + '<td>' + (t.maxConsecLoss == null ? '-' : t.maxConsecLoss) + '</td>'
+      + '<td>' + (t.avgHoldDays == null ? '-' : t.avgHoldDays) + '</td>'
+      + rCell(t.totalR, true)
+      + rCell(t.maxDrawdownR, false)
+      + '<td class="sub-count">' + escHtml(mixText(t.exitMix)) + '</td></tr>';
+  }).join('');
+
+  const detailRows = [];
+  const sim = d.simTrades || {};
+  Object.keys(sim).forEach(id => {
+    const name = ((d.stats || []).find(s => s.strategy === id) || {}).strategyName || id;
+    (sim[id] || []).forEach(t => {
+      detailRows.push('<tr><td>' + escHtml(name) + '</td><td>' + t.entryDate + '</td><td>' + fmt(t.entryPrice, 3) + '</td>'
+        + '<td>' + t.exitDate + '</td><td>' + fmt(t.exitPrice, 3) + '</td>'
+        + '<td>' + escHtml(t.exitReason || '') + '</td>'
+        + '<td class="' + pctCls(t.r) + '">' + fmtR(t.r) + '</td>'
+        + '<td>' + t.holdDays + '</td>'
+        + '<td>' + fmtR(t.maeR) + '</td>'
+        + '<td>' + fmtR(t.mfeR) + '</td>'
+        + '<td class="' + pctCls(t.netPct) + '">' + signPct(t.netPct) + '</td>'
+        + '<td>' + (t.benchPct == null ? '-' : signPct(t.benchPct)) + '</td></tr>');
+    });
+  });
+  const detail = detailRows.length
+    ? '<details style="margin-top:10px"><summary>逐笔明细（' + detailRows.length + ' 笔，点开核对）</summary>'
+      + '<div class="table-wrap" style="max-height:420px;overflow:auto"><table><thead><tr>'
+      + '<th>策略</th><th>入场日</th><th>入场价</th><th>出场日</th><th>出场价</th><th>出场原因</th>'
+      + '<th>R</th><th>持仓</th><th>最大不利</th><th>最大有利</th><th>净收益</th><th>同期基准</th>'
+      + '</tr></thead><tbody>' + detailRows.join('') + '</tbody></table></div></details>'
+    : '';
+
+  const rule = '次日开盘入场；持仓期间的新买点忽略（一次只持一笔）；初始止损 = 入场 − '
+    + (model.stopAtr == null ? 2 : model.stopAtr) + '×ATR(' + (model.atrPeriod == null ? 14 : model.atrPeriod)
+    + ')；赚到 ' + (model.breakevenAtR == null ? 1 : model.breakevenAtR) + 'R 把止损抬到成本；赚到 '
+    + (model.trailAtR == null ? 2 : model.trailAtR) + 'R 改用 ATR 跟踪；最长 '
+    + (model.maxHoldDays == null ? 20 : model.maxHoldDays) + ' 个交易日；卖点次日开盘出；已扣佣金/过户费/印花税/滑点。';
+
+  return '<div class="card" style="grid-column:1/-1"><h2>逐笔交易模拟（R 倍数与期望值）</h2>'
+    + '<p class="hint" style="margin-top:0">' + rule + '<br>'
+    + '<b>R = 这笔赚了几个「初始风险」</b>：−1R 表示刚好在初始止损被打掉，+2R 表示赚到两倍初始风险。'
+    + '<b>期望值 = 每笔平均赚多少个 R</b>，它同时装了胜率和盈亏比——胜率 35% 但盈亏比 1.5 是赚钱的，胜率 70% 但盈亏比 0.2 是亏钱的。'
+    + '单笔风险设成账户 1% 时，期望值 0.20R ≈ 每次下注平均赚账户的 0.2%。<br>'
+    + '<span class="neg">⚠️ 这是同一段历史的样本内结果，止损/跟踪参数没有做样本外验证，不能当成未来收益预期。</span></p>'
+    + '<div class="table-wrap"><table><thead><tr>'
+    + '<th>策略</th><th>交易数</th><th>胜率</th><th>期望值R</th><th>平均盈利R</th><th>平均亏损R</th>'
+    + '<th>盈亏比</th><th>最大连亏</th><th>平均持仓</th><th>累计R</th><th>R最大回撤</th><th>出场分布</th>'
+    + '</tr></thead><tbody>' + all + '</tbody></table></div>'
+    + '<p class="hint">「累计R」按单笔风险 1% 折算约等于账户累计收益（假设你能吃下每一个信号）；'
+    + '「R最大回撤」是这条 R 曲线从高点到低点的跌幅，也是你真正要熬过去的东西——它往往比总收益更决定你拿不拿得住。</p>'
+    + detail + '</div>';
+}
+
+function rCell(v, signed) {
+  if (v == null) return '<td>-</td>';
+  return '<td class="' + pctCls(signed ? v : -v) + '">' + fmtR(v) + '</td>';
+}
+
+function fmtR(v) {
+  if (v == null) return '-';
+  return (v > 0 ? '+' : '') + Number(v).toFixed(2);
+}
+
+function mixText(mix) {
+  if (!mix) return '-';
+  return Object.keys(mix).map(k => k + ' ' + mix[k]).join(' / ');
+}
+
+/** 基准取不到时明确说出来，不要静默留空 */
+function benchWarn(d) {
+  const b = d.benchmark || {};
+  if (b.available) return '';
+  return '<div class="alert warn" style="margin-top:10px">基准（' + escHtml(b.name || '沪深300')
+    + '）行情没取到，超额列会是空的：' + escHtml(b.error || '未知原因')
+    + '。它不挡策略信号，只影响「跑赢基准多少」这一列。</div>';
+}
+
+/** 胜率单元格：样本不足就明说，不给一个会骗人的百分比 */
+function winCell(h, compact) {
+  if (!h || !h.samples) return '<td>-</td>';
+  if (h.insufficient) return '<td><span class="sub-count">样本不足(' + h.samples + ')</span></td>';
+  return '<td>' + h.winRate + '%'
+    + (compact ? '' : '<span class="sub-count"> /' + h.samples + '</span>') + '</td>';
+}
+
+/** 收益单元格：null 显示 -，有值按涨跌上色 */
+function avgCell(h, field) {
+  if (!h || h[field] == null) return '<td>-</td>';
+  return '<td class="' + pctCls(h[field]) + '">' + signPct(h[field]) + '</td>';
 }
 
 function renderScenario(sc) {
@@ -816,14 +1006,23 @@ function renderLesson(ls) {
   const last = ls.lastSignal
     ? (ls.lastSignal.date + ' ' + (ls.lastSignal.action === 'BUY' ? '买' : '卖') + ' · ' + ls.lastSignal.reason)
     : '这段K线上还没有出现过信号';
-  const stat = ls.stats && ls.stats.winRate5d != null
-    ? ('本股 5 日胜率 ' + ls.stats.winRate5d + '%（样本 ' + (ls.stats.evaluated || 0) + '）')
+  const h5 = ls.stats && ls.stats.d5;
+  const stat = (h5 && h5.samples)
+    ? (h5.insufficient
+      ? ('本股 5 日样本只有 ' + h5.samples + ' 个，少于 30 个就不显示胜率')
+      : ('本股 5 日净胜率 ' + h5.winRate + '%（样本 ' + h5.samples + '，扣费后均值 '
+        + signPct(h5.netAvg) + (h5.excessAvg == null ? '' : '，超额 ' + signPct(h5.excessAvg)) + '）'))
     : '本股样本还不够，先看规则';
+  const tr = ls.stats && ls.stats.trade;
+  const tradeStat = (tr && tr.trades)
+    ? ('　·　逐笔模拟 ' + tr.trades + ' 笔，期望值 ' + fmtR(tr.expectancyR) + 'R'
+      + (tr.profitFactor == null ? '' : '，盈亏比 ' + tr.profitFactor))
+    : '';
   return '<div class="lesson">'
     + '<h3>' + ls.name + ' <span class="tag hold">' + ls.category + '</span> ' + st + '</h3>'
     + '<div class="summary">' + (ls.summary || '') + '</div>'
     + '<div class="lesson-now"><div class="lesson-snap">现在：' + snapText + '</div>'
-    + (ls.explain || '') + '<div class="lesson-snap" style="margin:8px 0 0;">最近信号：' + last + '　·　' + stat + '</div></div>'
+    + (ls.explain || '') + '<div class="lesson-snap" style="margin:8px 0 0;">最近信号：' + last + '　·　' + stat + tradeStat + '</div></div>'
     + '<details><summary>规则、适用场景、常见坑</summary>'
     + '<p><b>核心想法</b>　' + (ls.idea || '') + '</p>'
     + '<p><b>本系统怎么算</b>　' + (ls.how || '') + '</p>'
@@ -1051,7 +1250,11 @@ function savePosCapital() {
   const v = parseFloat(el && el.value);
   if (isNaN(v) || v <= 0) localStorage.removeItem('posCapital');
   else localStorage.setItem('posCapital', String(v));
+  // 净值卡片的「账户总资产」跟它保持同步，避免同一个数字两处不一致
+  const assetEl = document.getElementById('eqAsset');
+  if (assetEl && !isNaN(v) && v > 0) assetEl.value = v;
   loadPositions();
+  loadRisk(false);
 }
 
 function setPosRefreshBusy(busy) {
@@ -1108,7 +1311,8 @@ async function loadPositions(refresh) {
       const broken = list.filter(p => p.stopBroken);
       if (broken.length) {
         html += '<div class="alert bad" style="margin-top:12px;">🚨 '
-          + broken.map(p => (p.name || p.code) + '（' + signPct(p.floatPlPct) + '，纪律线 -' + (p.stopPct || 8) + '%）').join('、')
+          + broken.map(p => (p.name || p.code) + '（' + signPct(p.floatPlPct) + '，'
+            + (p.stopSourceLabel || '纪律线') + ' ' + fmt(p.stopLine, 3) + '）').join('、')
           + ' 已跌破纪律止损线。按纪律应离场复盘，不要硬抗。</div>';
       }
       if (d.topSectorWeight != null && d.topSectorWeight >= 50) {
@@ -1120,6 +1324,7 @@ async function loadPositions(refresh) {
       }
       dTip.innerHTML = html;
     }
+    renderPosReconcile();
     // 行业分布条
     const sBox = document.getElementById('posSectorBox');
     if (sBox) {
@@ -1138,12 +1343,14 @@ async function loadPositions(refresh) {
       const cls = pctCls(p.pctChange);
       const plCls = pctCls(p.floatPl);
       const plCell = p.floatPl == null ? '-' : ((p.floatPl < 0 ? '亏 ' : (p.floatPl > 0 ? '赚 ' : '')) + fmt(Math.abs(p.floatPl)));
+      const stopSrc = p.stopSourceLabel ? p.stopSourceLabel : '';
       const stopCell = p.stopLine == null ? '-' : (p.stopBroken
         ? '<span class="down"><strong>已破线 ' + fmt(p.stopLine, 3) + '</strong></span>'
-        : fmt(p.stopLine, 3) + ' <span class="sub">-' + (p.stopPct || 8) + '%'
+          + (stopSrc ? ' <span class="sub">' + stopSrc + '</span>' : '')
+        : fmt(p.stopLine, 3) + ' <span class="sub">' + (stopSrc ? stopSrc + ' · ' : '') + '-' + (p.stopPct || 8) + '%'
           + (p.stopDistancePct == null ? '' : ' · 距线 ' + p.stopDistancePct.toFixed(1) + '%') + '</span>');
       return '<tr' + (p.stopBroken ? ' class="stop-broken"' : '') + '><td><a onclick="openStrategy(\'' + p.code + '\')">' + p.code + '</a></td>'
-        + '<td>' + (p.name || '') + '</td>'
+        + '<td>' + (p.name || '') + (p.assetType === 'ETF' ? ' <span class="tag board">ETF</span>' : '') + '</td>'
         + '<td>' + renderBoardPath(p.boardPath, p.region) + '</td>'
         + '<td class="cmp-cell">' + renderRsCell(p.strength) + '</td>'
         + '<td>' + fmt(p.shares, 0) + '</td><td>' + fmt(p.costPrice, 3) + '</td><td>' + fmt(p.costAmount) + '</td>'
@@ -1205,7 +1412,12 @@ async function loadDiscipline(scan) {
     kpi.innerHTML =
       kpiHtml(summary.open || 0, '待处理')
       + '<div class="kpi"><div class="v ' + (summary.executeRate == null ? '' : (summary.executeRate >= 60 ? 'up' : 'down')) + '">'
-      + (summary.executeRate == null ? '-' : summary.executeRate + '%') + '</div><div class="l">纪律执行率（' + (summary.executed || 0) + ' 执行 / ' + (summary.ignored || 0) + ' 硬抗）</div></div>'
+      + (summary.executeRate == null ? '-' : summary.executeRate + '%') + '</div><div class="l">纪律执行率（'
+      + (summary.executed || 0) + ' 执行 / ' + (summary.ignored || 0) + ' 硬抗 / ' + (summary.open || 0) + ' 待处理）</div></div>'
+      + (summary.unverifiedExecuted > 0
+        ? '<div class="kpi"><div class="v down">' + (summary.verifiedExecuteRate == null ? '-' : summary.verifiedExecuteRate + '%')
+          + '</div><div class="l">核实后执行率（' + summary.unverifiedExecuted + ' 笔自报未对上卖出）</div></div>'
+        : '')
       + kpiHtml(summary.avgIgnoredDays == null ? '-' : summary.avgIgnoredDays + ' 天', '硬抗平均多拖')
       + '<div class="kpi"><div class="v ' + (summary.avgIgnoredExtraLoss > 0 ? 'down' : '') + '">'
       + (summary.avgIgnoredExtraLoss == null ? '-' : summary.avgIgnoredExtraLoss + '%') + '</div><div class="l">硬抗平均多亏</div></div>'
@@ -1273,16 +1485,39 @@ async function resolveEvent(id, action) {
   }
 }
 
-/* ---------- 净值快照（P0-2） ---------- */
+/* ---------- 净值快照（截断出入金对净值的干扰） ---------- */
+/** 总资产优先取净值卡片里的输入，其次取持仓页的「账户总资金」（两者都存本机） */
+function equityAssetInput() {
+  const el = document.getElementById('eqAsset');
+  const fromCard = el ? parseFloat(el.value) : NaN;
+  if (!isNaN(fromCard) && fromCard > 0) return fromCard;
+  const saved = parseFloat(localStorage.getItem('posCapital') || '');
+  return isNaN(saved) ? NaN : saved;
+}
+
+function equityFlowInput() {
+  const el = document.getElementById('eqFlow');
+  if (!el || el.value === '') return 0;
+  const v = parseFloat(el.value);
+  return isNaN(v) ? 0 : v;
+}
+
 async function snapshotEquity() {
-  const cap = parseFloat(localStorage.getItem('posCapital') || '');
+  const cap = equityAssetInput();
   if (isNaN(cap) || cap <= 0) {
-    toast('先在右上方填入「账户总资金」再记净值', 'warn');
+    toast('先填「账户总资产（含现金）」（统计图页或持仓页右上角都可以）', 'warn');
     return;
   }
+  const cashFlow = equityFlowInput();
   try {
-    const s = await postJSON('/api/equity/snapshot', { totalAsset: cap });
-    toast('已记今日净值：总资金 ' + fmt(s.totalAsset) + '（持仓 ' + fmt(s.positionValue) + '，现金约 ' + fmt(s.cash) + '）', 'success');
+    const s = await postJSON('/api/equity/snapshot', { totalAsset: cap, cashFlow: cashFlow });
+    const flowTip = cashFlow === 0 ? ''
+      : ('，已记录' + (cashFlow > 0 ? '入金 ' : '出金 ') + fmt(Math.abs(cashFlow)) + ' 元（不计入收益）');
+    toast('已记今日净值：总资产 ' + fmt(s.totalAsset) + '（持仓 ' + fmt(s.positionValue)
+      + '，现金约 ' + fmt(s.cash) + '）' + flowTip, 'success');
+    const flowEl = document.getElementById('eqFlow');
+    if (flowEl) flowEl.value = '';
+    loadEquity();
   } catch (e) {
     toast(e.message, 'error');
   }
@@ -1291,21 +1526,46 @@ async function snapshotEquity() {
 async function loadEquity() {
   const kpi = document.getElementById('equityKpi');
   if (!kpi) return;
+  const assetEl = document.getElementById('eqAsset');
+  if (assetEl && !assetEl.value) {
+    const saved = localStorage.getItem('posCapital');
+    if (saved) assetEl.value = saved;
+  }
   try {
-    const d = await getJSON('/api/equity/curve', 8000);
+    const d = await getJSON('/api/equity/curve', 15000);
     if (d.empty) {
-      kpi.innerHTML = '<div class="empty">还没有净值记录。每天在「持仓」页填总资金并点「记今日净值」。</div>';
+      kpi.innerHTML = '<div class="empty">还没有净值记录。在上面填「账户总资产」再点「记今日净值」，每天一次。</div>';
       const c = getChart('chartEquity');
       if (c) c.clear();
       return;
     }
-    kpi.innerHTML =
+    const benchLabel = '同期' + (d.benchName || '沪深300');
+    const returnLabel = '累计收益（剔除出入金，自 ' + (d.firstDate || '') + '）';
+    let html =
       kpiHtml(d.days, '已记天数')
-      + kpiHtml(fmt(d.latestAsset), '最新总资金')
-      + '<div class="kpi"><div class="v ' + pctCls(d.totalReturn) + '">' + signPct(d.totalReturn) + '</div><div class="l">累计收益（自 ' + (d.firstDate || '') + '）</div></div>'
-      + '<div class="kpi"><div class="v down">' + (d.maxDrawdown == null ? '-' : d.maxDrawdown + '%') + '</div><div class="l">最大回撤' + (d.maxDrawdownDate ? '（' + d.maxDrawdownDate + '）' : '') + '</div></div>'
-      + '<div class="kpi"><div class="v ' + pctCls(d.benchReturn) + '">' + (d.benchReturn == null ? '-' : signPct(d.benchReturn)) + '</div><div class="l">同期沪深300</div></div>';
-    equityLineChart('chartEquity', d.dates || [], d.mine || [], d.bench || []);
+      + kpiHtml(fmt(d.latestAsset), '最新总资产')
+      + '<div class="kpi"><div class="v ' + pctCls(d.totalReturn) + '">' + signPct(d.totalReturn) + '</div><div class="l">' + returnLabel + '</div></div>'
+      + '<div class="kpi"><div class="v down">' + (d.maxDrawdown == null ? '-' : d.maxDrawdown + '%') + '</div><div class="l">最大回撤' + (d.maxDrawdownDate ? '（' + d.maxDrawdownDate + '）' : '') + '</div></div>';
+    if (d.benchReturn == null) {
+      html += '<div class="kpi"><div class="v">-</div><div class="l">' + benchLabel + '（取数失败）</div></div>';
+    } else {
+      html += '<div class="kpi"><div class="v ' + pctCls(d.benchReturn) + '">' + signPct(d.benchReturn) + '</div><div class="l">' + benchLabel + '</div></div>'
+        + '<div class="kpi"><div class="v ' + pctCls(d.excessReturn) + '">' + signPct(d.excessReturn) + '</div><div class="l">超额（我 − ' + benchLabel + '）</div></div>';
+    }
+    if (d.annualReturn != null) {
+      html += '<div class="kpi"><div class="v ' + pctCls(d.annualReturn) + '">' + signPct(d.annualReturn) + '</div><div class="l">年化收益（' + d.spanDays + ' 天折算）</div></div>';
+    }
+    if (d.sharpe != null) {
+      html += '<div class="kpi"><div class="v">' + d.sharpe + '</div><div class="l">夏普（年化波动 ' + d.annualVol + '%）</div></div>';
+    }
+    kpi.innerHTML = html;
+    const tips = [];
+    if (d.cashFlowAdjusted) tips.push('净值已剔除出入金');
+    else tips.push('还没有记过出入金：如果你中途追加或取走过资金，请记账时填上，否则净值与回撤会被资金进出污染');
+    if (d.benchError) tips.push('基准取数失败：' + d.benchError);
+    if (d.annualReturn == null) tips.push('年化/夏普需要至少 20 笔记录且跨度 60 天以上');
+    kpi.insertAdjacentHTML('beforeend', '<div class="hint" style="grid-column:1/-1;margin:4px 0 0">' + tips.join('；') + '</div>');
+    equityLineChart('chartEquity', d.dates || [], d.mine || [], d.bench || [], d.flow || []);
   } catch (e) {
     kpi.innerHTML = '<div class="empty">' + e.message + '</div>';
   }
@@ -1455,10 +1715,11 @@ function resetPosition() {
   document.getElementById('pCost').value = '';
   document.getElementById('pCostAmt').value = '';
   document.getElementById('pStopPct').value = '';
+  document.getElementById('pAssetType').value = '';
   document.getElementById('pSaveBtn').textContent = '💾 保存持仓';
 }
 
-function openPosition(id, code, name, shares, costPrice, notes, stopPct) {
+function openPosition(id, code, name, shares, costPrice, notes, stopPct, assetType) {
   show('position');
   resetPosition();
   if (id) document.getElementById('pId').value = id;
@@ -1468,6 +1729,7 @@ function openPosition(id, code, name, shares, costPrice, notes, stopPct) {
   if (shares != null) document.getElementById('pShares').value = shares;
   if (costPrice != null) document.getElementById('pCost').value = costPrice;
   if (stopPct != null) document.getElementById('pStopPct').value = stopPct;
+  if (assetType) document.getElementById('pAssetType').value = assetType;
   recalcPositionCost();
   if (id) document.getElementById('pSaveBtn').textContent = '💾 保存修改';
   document.getElementById('pShares').focus();
@@ -1476,7 +1738,7 @@ function openPosition(id, code, name, shares, costPrice, notes, stopPct) {
 function editPosition(id) {
   const p = (positionCache || []).find(x => x.id === id);
   if (!p) return;
-  openPosition(p.id, p.code, p.name, p.shares, p.costPrice, p.notes, p.stopPct);
+  openPosition(p.id, p.code, p.name, p.shares, p.costPrice, p.notes, p.manualStopPct, p.assetType);
 }
 
 async function savePosition() {
@@ -1487,19 +1749,62 @@ async function savePosition() {
     shares: numOrNull('pShares'),
     costPrice: numOrNull('pCost'),
     costAmount: numOrNull('pCostAmt'),
-    stopPct: numOrNull('pStopPct')
+    stopPct: numOrNull('pStopPct'),
+    assetType: document.getElementById('pAssetType').value,
+    capital: (function () {
+      const v = parseFloat(localStorage.getItem('posCapital') || '');
+      return isNaN(v) || v <= 0 ? null : v;
+    })()
   };
   if (!body.code) { toast('请填写股票代码', 'warn'); return; }
   if (body.shares == null || body.shares <= 0) { toast('请填写持仓数量', 'warn'); return; }
   try {
-    const id = document.getElementById('pId').value;
-    if (id) await putJSON('/api/positions/' + id, body);
-    else await postJSON('/api/positions', body);
+    await submitPosition(body);
     toast('持仓已保存', 'success');
     resetPosition();
     loadPositions();
   } catch (e) {
+    if (e.message && e.message.indexOf('超过上限') >= 0) {
+      if (!confirm(e.message + '\n\n仍要保存？这会记成明知超限。')) return;
+      body.force = true;
+      try {
+        await submitPosition(body);
+        toast('已强制保存（超限）', 'warn');
+        resetPosition();
+        loadPositions();
+      } catch (e2) {
+        toast(e2.message, 'error');
+      }
+      return;
+    }
     toast(e.message, 'error');
+  }
+}
+
+async function submitPosition(body) {
+  const id = document.getElementById('pId').value;
+  if (id) await putJSON('/api/positions/' + id, body);
+  else await postJSON('/api/positions', body);
+}
+
+async function renderPosReconcile() {
+  const box = document.getElementById('posReconcile');
+  if (!box) return;
+  try {
+    const d = await getJSON('/api/positions/reconcile', 8000);
+    const n = d.mismatchCount || 0;
+    if (!n) {
+      box.innerHTML = d.tradeCount
+        ? '<p class="hint" style="margin:8px 0 0;">成交 FIFO 对账通过（已实现 ' + fmt(d.realized) + '）。</p>'
+        : '';
+      return;
+    }
+    box.innerHTML = '<div class="alert bad" style="margin-top:12px;">成交流水与持仓对不上 '
+      + n + ' 处：'
+      + (d.mismatches || []).map(m => (m.name || m.code) + ' ' + m.reason).join('；')
+      + '。以券商账户为准，改持仓或补成交。</div>';
+  } catch (e) {
+    box.innerHTML = '';
   }
 }
 
@@ -1516,6 +1821,7 @@ async function clearPosition(id) {
 
 async function loadCharts() {
   const kpi = document.getElementById('chartKpi');
+  if (!kpi) return;
   kpi.innerHTML = loadingHtml();
   try {
     const d = await getJSON('/api/stats/charts', 8000);
@@ -1527,7 +1833,7 @@ async function loadCharts() {
       + kpiHtml(d.tradeCount || 0, '成交笔数')
       + (disc.total != null
         ? '<div class="kpi"><div class="v ' + (disc.executeRate == null ? '' : (disc.executeRate >= 60 ? 'up' : 'down')) + '">'
-          + (disc.executeRate == null ? '-' : disc.executeRate + '%') + '</div><div class="l">纪律执行率</div></div>'
+          + (disc.executeRate == null ? '-' : disc.executeRate + '%') + '</div><div class="l">纪律执行率（含待处理）</div></div>'
         + '<div class="kpi"><div class="v down">' + (disc.avgIgnoredExtraLoss == null ? '-' : disc.avgIgnoredExtraLoss + '%') + '</div><div class="l">硬抗平均多亏</div></div>'
         : '');
     const months = d.months || [];
@@ -1540,7 +1846,7 @@ async function loadCharts() {
     const mistakes = d.mistakes || [];
     mistakeBarChart('chartMistake', mistakes.map(m => m.tag), mistakes.map(m => m.count));
     fillStrategyOverview(null);
-    getJSON('/api/strategy/overview', 8000).then(fillStrategyOverview).catch(() => fillStrategyOverview({ skipped: -1 }));
+    getJSON('/api/strategy/overview', 20000).then(fillStrategyOverview).catch(() => fillStrategyOverview({ skipped: -1 }));
   } catch (e) {
     kpi.innerHTML = '<div class="empty">' + e.message + '</div>';
   }
@@ -1557,22 +1863,333 @@ function fillStrategyOverview(ov) {
     return;
   }
   const strats = ov.strategies || [];
+  const winStrats = strats.filter(s => s.winRate5d != null && !s.insufficient);
   barChart('chartWin',
-    strats.map(s => s.strategyName),
-    strats.map(s => s.winRate5d == null ? 0 : s.winRate5d),
+    winStrats.map(s => s.strategyName),
+    winStrats.map(s => s.winRate5d),
     '#165dff');
   barChart('chartSig',
     strats.map(s => s.strategyName),
     strats.map(s => (s.buyCount || 0) + (s.sellCount || 0)),
     '#d4820a');
+  // 每笔期望值：正负分开上色，一眼看出哪套打法真的有正期望
+  const withTrades = strats.filter(s => s.expectancyR != null);
+  signedBarChart('chartExpect',
+    withTrades.map(s => s.strategyName),
+    withTrades.map(s => s.expectancyR));
+  const expectHint = document.getElementById('chartExpectHint');
+  if (expectHint) {
+    expectHint.innerHTML = withTrades.length
+      ? ('每笔平均赚多少个 R（已含止损/保本/跟踪出场与费用）。单笔风险 1% 时，0.20R ≈ 每次平均赚账户 0.2%。'
+        + '<br>合计：' + withTrades.map(s => s.strategyName + ' ' + fmtR(s.expectancyR) + 'R/' + s.trades + '笔').join('、'))
+      : '还没有可统计的逐笔交易。先去「策略学习」看几只票（要缓存过日 K），再回来刷新。';
+  }
+  renderTradeModel(ov.tradeModel);
   if (winHint) {
-    winHint.textContent = (ov.stockCount ? ('已用缓存日 K 统计 ' + ov.stockCount + ' 只。') : '')
-      + (ov.skipped ? '有 ' + ov.skipped + ' 只还没拉过 K 线，打开「策略学习」看过的票才会进入胜率。' : (ov.stockCount ? '' : '策略胜率不现场全算自选，避免卡住。先去「策略学习」看几只，再回来刷新。'));
+    const costTip = ov.tradeCostPct == null ? '' : ('（已扣往返成本约 ' + ov.tradeCostPct + '%）');
+    const benchTip = ov.benchmarkAvailable === false
+      ? '基准行情没取到，超额暂时算不出来。'
+      : '同一批信号扣费后的平均超额：' + strats
+        .filter(s => s.excessAvg5d != null)
+        .map(s => s.strategyName + ' ' + signPct(s.excessAvg5d))
+        .join('、');
+    winHint.innerHTML = '净胜率' + costTip + '，样本少于 30 个的策略不参与比较。'
+      + (ov.stockCount ? ('已用缓存日 K 统计 ' + ov.stockCount + ' 只。') : '')
+      + (ov.skipped ? '有 ' + ov.skipped + ' 只还没拉过 K 线，打开「策略学习」看过的票才会进入胜率。' : (ov.stockCount ? '' : '策略胜率不现场全算自选，避免卡住。先去「策略学习」看几只，再回来刷新。'))
+      + (benchTip ? '<br>' + benchTip : '');
   }
 }
 
 function kpiHtml(v, l) {
   return '<div class="kpi"><div class="v">' + v + '</div><div class="l">' + l + '</div></div>';
+}
+
+/* ---------- 执行偏差（计划 → 成交闭环） ---------- */
+async function loadExecution() {
+  const box = document.getElementById('executionBox');
+  if (!box) return;
+  try {
+    const d = await getJSON('/api/execution/report', 15000);
+    box.innerHTML = renderExecution(d);
+  } catch (e) {
+    box.innerHTML = '<div class="empty">' + e.message + '</div>';
+  }
+}
+
+function renderExecution(d) {
+  if (!d.closedTrips) {
+    return '<div class="empty">还没有已平仓的成交。先到「成交录入」把买卖流水记上，或从同花顺导入，这里才能对账。</div>';
+  }
+  const kpis =
+    kpiHtml(d.closedTrips + ' 笔', '已平仓交易')
+    + kpiHtml(d.planRate == null ? '-' : d.planRate + '%', '有计划的比例（' + d.plannedTrips + '/' + d.closedTrips + '）')
+    + kpiHtml(d.complianceRate == null ? '-' : d.complianceRate + '%', '按计划执行的比例（' + d.compliantTrips + '/' + d.plannedTrips + '）')
+    + '<div class="kpi"><div class="v ' + (d.violationCostTotal < 0 ? 'down' : '') + '">'
+      + fmt(d.violationCostTotal) + '</div><div class="l">违规代价合计（元，能算成钱的部分）</div></div>';
+
+  const groupRows = (d.groups || []).map(g =>
+    '<tr><td>' + escHtml(g.group) + '</td><td>' + g.trades + '</td>'
+    + '<td>' + (g.withR || 0) + '</td>'
+    + '<td>' + (g.winRate == null ? '-' : g.winRate + '%') + '</td>'
+    + '<td class="' + (g.expectancyR == null ? '' : pctCls(g.expectancyR)) + '">'
+      + (g.expectancyR == null ? '<span class="sub-count">算不出R（计划没止损价）</span>' : fmtR(g.expectancyR) + 'R') + '</td></tr>').join('');
+
+  const typeRows = (d.byType || []).map(t =>
+    '<tr><td>' + escHtml(t.type) + '</td><td>' + t.count + '</td>'
+    + '<td class="' + (t.cost < 0 ? 'down' : '') + '">' + fmt(t.cost) + ' 元</td></tr>').join('');
+
+  const tripRows = (d.trips || []).map(t => {
+    const cost = t.violationCost;
+    const plan = t.planned
+      ? ('计划 ' + fmt(t.planPrice, 3) + ' / 止损 ' + fmt(t.planStop, 3)
+        + (t.planTarget == null ? '' : ' / 目标 ' + fmt(t.planTarget, 3))
+        + (t.planHoldDays == null ? '' : ' / ' + t.planHoldDays + '天'))
+      : '<span class="down">无计划</span>';
+    return '<tr><td>' + t.code + '</td><td>' + escHtml(t.name || '') + '</td>'
+      + '<td>' + t.entryDate + '</td><td>' + fmt(t.entryPrice, 3) + '</td>'
+      + '<td>' + (t.exitDate || '') + '</td><td>' + fmt(t.exitPrice, 3) + '</td>'
+      + '<td>' + t.holdDays + '</td>'
+      + '<td class="' + pctCls(t.pnl) + '">' + fmt(t.pnl) + '</td>'
+      + '<td class="' + (t.r == null ? '' : pctCls(t.r)) + '">' + (t.r == null ? '-' : fmtR(t.r)) + '</td>'
+      + '<td class="sub-count">' + plan + '</td>'
+      + '<td class="' + (cost < 0 ? 'down' : '') + '">' + (cost ? fmt(cost) : '—') + '</td>'
+      + '<td class="sub-count">' + escHtml((t.flags || []).join('；') || '—') + '</td></tr>';
+  }).join('');
+
+  const disc = d.discipline || {};
+  let discHtml = '<div class="alert ' + ((disc.unverifiedExecuted || 0) > 0 ? 'bad' : 'ok') + '" style="margin-top:10px">'
+    + '<b>纪律事件对账：</b>标记「已执行止损」' + (disc.executedEvents || 0) + ' 次，能在流水里核实到卖出 '
+    + (disc.verifiedSells || 0) + ' 次'
+    + ((disc.unverifiedExecuted || 0) > 0 ? '，<b>有 ' + disc.unverifiedExecuted + ' 次找不到对应卖出</b>' : '')
+    + '；标记「硬抗」' + (disc.ignoredEvents || 0) + ' 次，其中 ' + (disc.ignoredWithFill || 0)
+    + ' 次已真实卖出，用真实成交价重算的额外亏损合计 <b>' + fmt(disc.extraLossFromFills) + ' 元</b>。'
+    + '<div class="sub-count" style="margin-top:4px">' + escHtml(disc.note || '') + '</div>'
+    + ((disc.problems || []).length
+      ? '<ul style="margin:6px 0 0;padding-left:18px">' + disc.problems.map(p =>
+        '<li>' + (p.code ? escHtml(p.code + ' ' + (p.name || '')) + '：' : '') + escHtml(p.text) + '</li>').join('') + '</ul>'
+      : '')
+    + '</div>';
+
+  return '<div class="grid4">' + kpis + '</div>'
+    + '<div class="grid2" style="margin-top:10px">'
+    + '<div><h3 style="margin:0 0 6px;font-size:13px">按计划 vs 违规：期望值差多少</h3>'
+    + '<div class="table-wrap"><table><thead><tr><th>分组</th><th>笔数</th><th>能算R的</th><th>胜率</th><th>期望值</th></tr></thead><tbody>'
+    + groupRows + '</tbody></table></div>'
+    + '<p class="hint">这就是「执行偏差值多少钱」的核心对照：如果「按计划执行」的期望值明显高于「有计划但违规」，'
+    + '那你亏的不是选股，是执行。</p></div>'
+    + '<div><h3 style="margin:0 0 6px;font-size:13px">违规类型与代价</h3>'
+    + (typeRows
+      ? '<div class="table-wrap"><table><thead><tr><th>类型</th><th>次数</th><th>代价</th></tr></thead><tbody>' + typeRows + '</tbody></table></div>'
+      : '<p class="hint">没有检测到能折成钱的偏差。</p>')
+    + '</div></div>'
+    + discHtml
+    + '<details style="margin-top:10px"><summary>逐笔明细（' + (d.trips || []).length + ' 笔）</summary>'
+    + '<div class="table-wrap" style="max-height:420px;overflow:auto"><table><thead><tr>'
+    + '<th>代码</th><th>名称</th><th>入场日</th><th>入场价</th><th>出场日</th><th>出场价</th><th>持有</th>'
+    + '<th>盈亏</th><th>R</th><th>计划</th><th>违规代价</th><th>偏差</th>'
+    + '</tr></thead><tbody>' + tripRows + '</tbody></table></div></details>'
+    + '<p class="hint">' + escHtml(d.note || '') + '</p>';
+}
+
+/* ---------- 风险与仓位（ATR 口径） ---------- */
+function riskNum(id, def) {
+  const el = document.getElementById(id);
+  const v = el ? parseFloat(el.value) : NaN;
+  return isNaN(v) ? def : v;
+}
+
+async function loadRisk(refresh) {
+  const box = document.getElementById('riskBox');
+  if (!box) return;
+  const btn = document.getElementById('riskRefreshBtn');
+  if (btn) { btn.disabled = true; btn.textContent = refresh ? '拉行情中…' : '计算中…'; }
+  try {
+    const cap = equityAssetInput();
+    let url = '/api/positions/risk?refresh=' + (refresh ? 'true' : 'false')
+      + '&riskPerTradePct=' + riskNum('riskPerTrade', 1)
+      + '&maxStockPct=' + riskNum('riskMaxStock', 25)
+      + '&maxSectorPct=' + riskNum('riskMaxSector', 40)
+      + '&maxPositions=' + riskNum('riskMaxPos', 8);
+    if (!isNaN(cap) && cap > 0) url += '&capital=' + cap;
+    const d = await getJSON(url, refresh ? 60000 : 15000);
+    box.innerHTML = renderRisk(d);
+  } catch (e) {
+    box.innerHTML = '<div class="empty">' + e.message + '</div>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '刷新并拉行情'; }
+  }
+}
+
+function renderRisk(d) {
+  if (!d.rows || !d.rows.length) {
+    return '<div class="empty">还没有持仓。在下面录入持仓后这里会算单笔风险和建议股数。</div>';
+  }
+  const kpis =
+    kpiHtml(d.positionPct == null ? '-' : d.positionPct + '%', '总仓位（占总资金）')
+    + kpiHtml(d.cashPct == null ? '-' : d.cashPct + '%', '现金')
+    + kpiHtml(d.totalRiskPct == null ? '-' : d.totalRiskPct + '%',
+      '组合风险（全部跌到 ATR 止损 = ' + fmt(d.totalRiskAmount) + ' 元）')
+    + kpiHtml(d.positionCount + ' 只', '持仓数（上限 ' + d.limits.maxPositions + '）')
+    + kpiHtml(d.atrAvailable + ' / ' + d.positionCount, '已算到 ATR');
+
+  const rows = d.rows.map(r => {
+    const cls = (r.flags && r.flags.length) ? (r.flags.some(f => f.indexOf('超过上限') >= 0) ? 'down' : '') : '';
+    const w = r.weightPct;
+    const weightCell = (w == null) ? '-' : '<span class="' + (w > d.limits.maxStockPct ? 'down' : '') + '">' + w + '%</span>';
+    const riskCell = (r.riskPct == null) ? '-'
+      : '<span class="' + (r.riskPct > d.limits.maxRiskPct ? 'down' : '') + '">' + r.riskPct + '%</span>';
+    const atrCell = (r.atr == null) ? '<span class="sub-count">无数据</span>'
+      : fmt(r.atr, 2) + ' <span class="sub-count">(' + r.atrPct + '%)</span>';
+    const stopCell = (r.atrStop == null) ? '-' : fmt(r.atrStop, 2);
+    const distCell = (r.disciplineAtrMultiple == null) ? '<span class="sub-count">无纪律线</span>'
+      : (r.disciplineAtrMultiple + ' ATR'
+        + (r.disciplineAtrMultiple < 1 ? ' <span class="down">太紧</span>'
+          : (r.disciplineAtrMultiple > 4 ? ' <span class="neg">太松</span>' : '')));
+    const suggest = (r.suggestShares == null) ? '-' : (fmt(r.suggestShares, 0) + ' 股');
+    return '<tr class="' + cls + '"><td>' + r.code + '</td><td>' + escHtml(r.name || '') + '</td>'
+      + '<td>' + fmt(r.price, 2) + '</td>'
+      + '<td>' + atrCell + '</td>'
+      + '<td>' + stopCell + '</td>'
+      + '<td>' + distCell + '</td>'
+      + '<td>' + (r.riskAmount == null ? '-' : fmt(r.riskAmount, 0) + ' 元') + '</td>'
+      + '<td>' + riskCell + '</td>'
+      + '<td>' + weightCell + '</td>'
+      + '<td>' + escHtml(r.sector || '') + '</td>'
+      + '<td>' + suggest + '</td>'
+      + '<td class="sub-count">' + (r.flags && r.flags.length ? escHtml(r.flags.join('；')) : '—') + '</td></tr>';
+  }).join('');
+
+  const sectors = (d.sectors || []).slice(0, 6).map(s =>
+    '<span class="tag ' + ((s.pct != null && s.pct > d.limits.maxSectorPct) ? 'sell' : 'hold') + '">'
+    + escHtml(s.name) + ' ' + (s.pct == null ? '-' : s.pct + '%') + '</span>').join(' ');
+
+  const vio = (d.violations || []).length
+    ? '<div class="alert ' + (d.violations.some(v => v.level === 'bad') ? 'bad' : 'warn') + '" style="margin-top:10px"><b>风控检查：</b><ul style="margin:6px 0 0;padding-left:18px">'
+      + d.violations.map(v => '<li>' + (v.code ? escHtml(v.code + ' ' + (v.name || '')) + '：' : '') + escHtml(v.text) + '</li>').join('')
+      + '</ul></div>'
+    : '<div class="alert ok" style="margin-top:10px">风控检查：没有触发任何上限——这不代表没有风险，只代表没越线。</div>';
+
+  return '<div class="grid4">' + kpis + '</div>'
+    + '<p class="hint">' + escHtml(d.capitalSourceNote || '') + '　' + escHtml(d.note || '') + '</p>'
+    + '<div class="table-wrap"><table><thead><tr>'
+    + '<th>代码</th><th>名称</th><th>现价</th><th>ATR(14)</th><th>ATR止损</th><th>纪律线/ATR</th>'
+    + '<th>单笔风险</th><th>风险占比</th><th>仓位占比</th><th>行业</th><th>建议股数</th><th>提示</th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table></div>'
+    + (sectors ? '<p class="hint">行业分布（占总资金）：' + sectors + '</p>' : '')
+    + vio;
+}
+
+/* ---------- 样本外验证（walk-forward） ---------- */
+async function loadWalkForward() {
+  const box = document.getElementById('wfBox');
+  const btn = document.getElementById('wfBtn');
+  if (!box) return;
+  if (btn) { btn.disabled = true; btn.textContent = '计算中…'; }
+  box.innerHTML = '<p class="hint" style="margin-top:0">正在做样本外验证（每折都要在参数网格上重挑一次）…</p>';
+  try {
+    const d = await getJSON('/api/strategy/walk-forward?fill=true', 120000);
+    box.innerHTML = renderWalkForward(d);
+  } catch (e) {
+    box.innerHTML = '<div class="empty">' + e.message + '</div>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '重新跑一次'; }
+  }
+}
+
+function renderWalkForward(d) {
+  if (d.needMore) {
+    const n = d.watchlistCount == null ? 0 : d.watchlistCount;
+    const ready = d.stockCount == null ? 0 : d.stockCount;
+    return '<div class="alert warn">' + escHtml(d.message || '') + '</div>'
+      + '<p class="hint">操作：打开「自选股」→ 用上方表单加代码（至少 5 只）→ 回到这里再点「跑一次样本外验证」。'
+      + '当前自选 ' + n + ' 只，日 K 齐的 ' + ready + ' 只。</p>';
+  }
+  const list = d.strategies || [];
+  if (!list.length) {
+    return '<div class="empty">没有可用的样本。</div>';
+  }
+  const rows = list.map(s => {
+    const t = s.oosTStat;
+    // |t| < 2 基本等同于「跟 0 分不出来」，所以把这种行标灰
+    const verdict = (t == null) ? '<span class="sub-count">样本不足</span>'
+      : (Math.abs(t) < 2 ? '<span class="neg">与 0 分不出来</span>'
+        : (t > 0 ? '<span class="pos">可能为正</span>' : '<span class="down">可能为负</span>'));
+    return '<tr><td>' + escHtml(s.strategyName) + '</td>'
+      + '<td>' + s.oosTrades + '</td>'
+      + rCell(s.oosExpectancyR, true)
+      + '<td>' + (s.oosStdErr == null ? '-' : s.oosStdErr) + '</td>'
+      + '<td>' + (t == null ? '-' : t) + '</td>'
+      + '<td>' + (s.oosWinRate == null ? '-' : s.oosWinRate + '%') + '</td>'
+      + rCell(s.isBestExpectancyR, true)
+      + rCell(s.gridMedian, true)
+      + rCell(s.gridMin, true)
+      + '<td>' + verdict + '</td>'
+      + '<td class="sub-count">' + s.positiveFolds + '/' + s.usedFolds + '</td></tr>';
+  }).join('');
+
+  const details = list.map(s => {
+    const folds = (s.foldList || []).map(f =>
+      '<tr><td>' + f.index + '</td><td>' + f.testStart + '~' + f.testEnd + '</td><td>' + escHtml(f.params) + '</td>'
+      + '<td>' + f.trainTrades + '</td>' + rCell(f.trainExpectancyR, true)
+      + '<td>' + f.testTrades + '</td>' + rCell(f.testExpectancyR, true) + '</tr>').join('');
+    const sens = {};
+    (s.sensitivity || []).forEach(r => { (sens[r.param] = sens[r.param] || []).push(r); });
+    const sensRows = Object.keys(sens).map(p =>
+      '<tr><td>' + escHtml(p) + '</td>' + sens[p].map(r =>
+        '<td' + (r.expectancyR == null ? '' : ' class="' + pctCls(r.expectancyR) + '"') + '>'
+        + trimNum(r.value) + ' → ' + (r.expectancyR == null ? '-' : fmtR(r.expectancyR)) + 'R</td>').join('') + '</tr>').join('');
+    return '<details style="margin-top:8px"><summary>' + escHtml(s.strategyName) + '：每一折 + 参数敏感性</summary>'
+      + '<div class="table-wrap"><table><thead><tr><th>折</th><th>测试段</th><th>训练段选出的参数</th>'
+      + '<th>训练笔数</th><th>训练期望</th><th>测试笔数</th><th>测试期望</th></tr></thead><tbody>' + folds + '</tbody></table></div>'
+      + '<div class="table-wrap" style="margin-top:8px"><table><thead><tr><th>参数（其余保持默认）</th>'
+      + '<th colspan="4">取值 → 全样本期望值</th></tr></thead><tbody>' + sensRows + '</tbody></table></div></details>';
+  }).join('');
+
+  const positives = list.filter(s => s.oosExpectancyR != null && s.oosExpectancyR > 0).length;
+  const significant = list.filter(s => s.oosTStat != null && s.oosTStat > 2).length;
+  return '<div class="alert ' + (significant ? 'warn' : 'bad') + '">'
+    + '<b>结论：</b>样本外一共 ' + list.length + ' 套策略，' + positives + ' 套期望值为正，'
+    + '<b>' + significant + ' 套</b>的 t 值超过 2（也就是「和 0 分得出来」）。'
+    + (significant ? '' : ' <b>没有任何一套能证明自己有正期望</b>——但这也说明它没骗你。')
+    + '</div>'
+    + '<p class="hint">用的是 ' + (d.stockCount || 0) + ' 只缓存过日 K 的股票，时间轴切 ' + d.folds
+    + ' 段、参数网格 ' + d.gridCombos + ' 组、训练段至少 ' + d.minTrainTrades + ' 笔交易才允许挑参数。</p>'
+    + '<div class="table-wrap"><table><thead><tr>'
+    + '<th>策略</th><th>样本外笔数</th><th>样本外期望R</th><th>标准误</th><th>t值</th><th>样本外胜率</th>'
+    + '<th>全样本最优</th><th>网格中位</th><th>网格最差</th><th>判定</th><th>为正的折</th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table></div>'
+    + '<p class="hint"><b>怎么读：</b>「样本外期望R」是唯一诚实的数字——只用过去挑参数、再往未来跑；'
+    + '「全样本最优」是同一批数据里挑出来的最好看的值，两者的差距就是过拟合的代价。'
+    + '「网格最差」如果是负的、中位只勉强为正，说明这套打法只在某个特定参数上成立。<br>'
+    + '⚠️ 折数少（这里只有 ' + (d.folds - 1) + ' 折）、样本区间单一，所以「样本外为正」也只是「没被证伪」，'
+    + '不等于「已经验证有效」。</p>'
+    + details;
+}
+
+function trimNum(v) {
+  return v == null ? '-' : (Number(v) === Math.round(Number(v)) ? String(Math.round(Number(v))) : String(v));
+}
+
+/** 逐笔交易模型说明：参数摊开写，方便你自己质疑和改 */
+function renderTradeModel(m) {  const box = document.getElementById('tradeModelBox');
+  if (!box) return;
+  if (!m) {
+    box.innerHTML = '<div class="empty">模型参数暂不可用。</div>';
+    return;
+  }
+  box.innerHTML =
+    '<p class="hint" style="margin-top:0">回测里「每一笔」是怎么撮合的（全部写死、可对照）：</p>'
+    + '<ul class="hint" style="margin:0;padding-left:18px;line-height:1.9">'
+    + '<li>入场：买点<b>次日开盘价</b>；开盘就涨停（缺口 ≥ 9.5%）算买不到，跳过</li>'
+    + '<li>一次只持一笔：持仓期间的新买点全部忽略（避免把 1 笔算成 5 笔）</li>'
+    + '<li>初始止损：入场 − <b>' + m.stopAtr + '×ATR(' + m.atrPeriod + ')</b>，这段距离就是 1R</li>'
+    + '<li>赚到 <b>' + m.breakevenAtR + 'R</b> 把止损抬到成本；赚到 <b>' + m.trailAtR + 'R</b> 改用 ATR 跟踪，只升不降</li>'
+    + '<li>最长持有 <b>' + m.maxHoldDays + ' 个交易日</b>；出卖点信号则次日开盘出</li>'
+    + '<li>买卖都加 0.05% 滑点，佣金/过户费/印花税全扣；跳空跌破止损按<b>开盘价</b>成交（比按止损价更亏）</li>'
+    + '<li>交易数少于 <b>' + m.minTrades + '</b> 笔时标记「样本少」，只能当参考</li>'
+    + '</ul>'
+    + '<p class="hint"><span class="neg">⚠️ 参数（2×ATR、1R 保本、2R 跟踪、20 日）是手工设定的，没有做样本外验证；'
+    + '换一段行情、换一批股票，结论可能完全不同。</span></p>';
 }
 
 async function loadTrades() {
@@ -1681,8 +2298,13 @@ function resetTrade() {
   if (days) days.value = '';
   const writePlan = document.getElementById('tWritePlan');
   if (writePlan) writePlan.checked = true;
+  const pick = document.getElementById('tPlanPick');
+  if (pick) pick.innerHTML = '<option value="">— 输入代码后自动带出进行中的计划 —</option>';
+  const tip = document.getElementById('tPlanPickTip');
+  if (tip) tip.textContent = '';
+  openPlanCache = [];
   document.getElementById('tSaveBtn').textContent = '💾 保存成交';
-  document.getElementById('tradeFormTitle').textContent = '手动录入成交';
+  document.getElementById('tradeFormTitle').textContent = '录入成交';
   if (!document.getElementById('tDate').value) document.getElementById('tDate').value = todayStr();
 }
 
@@ -1717,24 +2339,45 @@ async function saveTrade() {
       source: 'MANUAL'
     };
     const id = document.getElementById('tId').value;
+    const pickEl = document.getElementById('tPlanPick');
+    const pickedPlanId = pickEl ? pickEl.value : '';
+    const writePlanEl = document.getElementById('tWritePlan');
     let saved = null;
-    if (id) await putJSON('/api/trades/' + id, body);
-    else saved = await postJSON('/api/trades', body);
-    if (!id && body.direction === 'buy' && document.getElementById('tWritePlan') && document.getElementById('tWritePlan').checked) {
-      try {
-        await postJSON('/api/plans', {
-          code: body.code,
-          name: body.name,
-          planDate: body.tradeDate || todayStr(),
-          planPrice: body.price,
-          stopPrice: numOrNull('tStop'),
-          targetPrice: numOrNull('tTarget'),
-          holdDays: numOrNull('tHoldDays'),
-          reason: body.note || '买入时写入计划',
-          buyTradeId: saved && saved.id
-        });
-      } catch (pe) {
-        toast('成交已保存，计划未写入：' + pe.message, 'warn');
+    if (id) {
+      await putJSON('/api/trades/' + id, body);
+    } else {
+      saved = await postJSON('/api/trades', body);
+    }
+    if (!id && body.direction === 'buy' && saved && saved.id) {
+      if (pickedPlanId) {
+        // 关联到已经写好的那条计划（闭环），而不是再新建一条
+        try {
+          await postJSON('/api/plans/' + pickedPlanId + '/attach-trade?tradeId=' + saved.id, {});
+          toast('成交已保存，并挂到计划 #' + pickedPlanId, 'success');
+        } catch (pe) {
+          toast('成交已保存，但没能挂到计划：' + pe.message, 'warn');
+        }
+      } else if (writePlanEl && writePlanEl.checked) {
+        try {
+          await postJSON('/api/plans', {
+            code: body.code,
+            name: body.name,
+            planDate: body.tradeDate || todayStr(),
+            planPrice: body.price,
+            stopPrice: numOrNull('tStop'),
+            targetPrice: numOrNull('tTarget'),
+            holdDays: numOrNull('tHoldDays'),
+            reason: body.note || '买入时写入计划',
+            buyTradeId: saved.id
+          });
+          if (numOrNull('tStop') == null) {
+            toast('成交与计划已保存，但计划里没填止损价 —— 这笔算不出 R，报表里也判断不了「有没有按计划止损」', 'warn');
+          }
+        } catch (pe) {
+          toast('成交已保存，计划未写入：' + pe.message, 'warn');
+        }
+      } else {
+        toast('成交已保存（没有关联计划，这笔会算「无计划交易」）', 'warn');
       }
     }
     if (!id && body.direction === 'sell') {
@@ -1742,12 +2385,68 @@ async function saveTrade() {
         await postJSON('/api/plans/close-code?code=' + encodeURIComponent(body.code), { note: body.note || '卖出结束计划' });
       } catch (_) {}
     }
-    toast('成交已保存', 'success');
+    if (id || !saved || !saved.id || body.direction !== 'buy') {
+      toast('成交已保存', 'success');
+    }
     resetTrade();
     loadTrades();
+    loadExecution();
   } catch (e) {
     toast(e.message, 'error');
   }
+}
+
+/* ---------- 成交录入：关联已有计划 ---------- */
+let openPlanCache = [];
+
+/** 代码或方向变化时，列出这只票「进行中」的计划供选择 */
+async function loadTradePlanOptions() {
+  const pick = document.getElementById('tPlanPick');
+  if (!pick) return;
+  const dir = document.getElementById('tDir').value;
+  const row = document.getElementById('tPlanLinkRow');
+  const isBuy = dir === 'buy';
+  if (row) row.style.display = isBuy ? '' : 'none';
+  if (!isBuy) return;
+  const code = document.getElementById('tCode').value.trim();
+  const current = pick.value;
+  try {
+    if (!openPlanCache.length) {
+      openPlanCache = await getJSON('/api/plans?status=OPEN', 8000);
+    }
+  } catch (e) {
+    openPlanCache = [];
+  }
+  const mine = openPlanCache.filter(p => !code || p.code === code);
+  if (!mine.length) {
+    pick.innerHTML = '<option value="">— 该股票没有进行中的计划（可在右边勾选新建）—</option>';
+    return;
+  }
+  pick.innerHTML = '<option value="">— 不关联（会算「无计划交易」）—</option>'
+    + mine.map(p => '<option value="' + p.id + '">#' + p.id + ' ' + (p.code || '') + ' ' + (p.name || '')
+      + '｜计划价 ' + fmt(p.planPrice, 3)
+      + '｜止损 ' + (p.stopPrice == null ? '未填' : fmt(p.stopPrice, 3))
+      + '｜' + (p.planDate || '') + '</option>').join('');
+  if (current && mine.some(p => String(p.id) === String(current))) {
+    pick.value = current;
+  } else {
+    // 「先写计划、过几天再买」是最常见的路径：默认直接挂到最近那条计划上，
+    // 而不是再新建一条——否则报表永远配不准。
+    pick.value = String(mine[0].id);
+  }
+  onPlanPickChange();
+  const tip = document.getElementById('tPlanPickTip');
+  if (tip) {
+    tip.textContent = '这笔买入会挂到计划 #' + pick.value + '（' + (mine[0].name || mine[0].code) + '）';
+  }
+}
+
+/** 选了已有计划就不再需要「新建」，把新建勾选框同步过来 */
+function onPlanPickChange() {
+  const pick = document.getElementById('tPlanPick');
+  const chk = document.getElementById('tWritePlan');
+  if (!pick || !chk) return;
+  chk.checked = !pick.value;
 }
 
 function numOrNull(id) {
@@ -1787,4 +2486,5 @@ async function importThs() {
 
 document.getElementById('reviewDate').addEventListener('change', loadToday);
 loadToday();
+pollAlerts();
 initStrategyPicks();

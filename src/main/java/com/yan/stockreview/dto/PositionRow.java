@@ -17,10 +17,13 @@ public class PositionRow {
     private Double floatPl;
     private Double floatPlPct;
     private Double weight;
-    /** 纪律止损线 = 成本价 × (1 - stopPct/100)，默认 -8% */
+    /** 纪律止损线 = 成本价 × (1 - stopPct/100)，默认按类别：个股 -8% / ETF -12% */
     private Double stopLine;
-    /** 本只生效的纪律线幅度（%），默认 8 */
+    /** 本只生效的纪律线幅度（%） */
     private Double stopPct;
+    /** 资产类别：STOCK / ETF */
+    private String assetType;
+    private String assetTypeLabel;
     /** 现价是否已跌破纪律止损线 */
     private Boolean stopBroken;
     /** 现价相对纪律止损线的距离%，正数=仍在线上方 */
@@ -34,6 +37,11 @@ public class PositionRow {
     private Double planTarget;
     private Integer planHoldDays;
     private Integer planHeldDays;
+    /** ATR / MANUAL / DEFAULT_PCT */
+    private String stopSource;
+    private String stopSourceLabel;
+    /** 用户手填的幅度；空表示未覆盖（表单编辑时用，不要把 ATR 算出来的有效幅度写回去） */
+    private Double manualStopPct;
 
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
@@ -67,6 +75,10 @@ public class PositionRow {
     public void setStopLine(Double stopLine) { this.stopLine = stopLine; }
     public Double getStopPct() { return stopPct; }
     public void setStopPct(Double stopPct) { this.stopPct = stopPct; }
+    public String getAssetType() { return assetType; }
+    public void setAssetType(String assetType) { this.assetType = assetType; }
+    public String getAssetTypeLabel() { return assetTypeLabel; }
+    public void setAssetTypeLabel(String assetTypeLabel) { this.assetTypeLabel = assetTypeLabel; }
     public Boolean getStopBroken() { return stopBroken; }
     public void setStopBroken(Boolean stopBroken) { this.stopBroken = stopBroken; }
     public Double getStopDistancePct() { return stopDistancePct; }
@@ -89,4 +101,10 @@ public class PositionRow {
     public void setPlanHoldDays(Integer planHoldDays) { this.planHoldDays = planHoldDays; }
     public Integer getPlanHeldDays() { return planHeldDays; }
     public void setPlanHeldDays(Integer planHeldDays) { this.planHeldDays = planHeldDays; }
+    public String getStopSource() { return stopSource; }
+    public void setStopSource(String stopSource) { this.stopSource = stopSource; }
+    public String getStopSourceLabel() { return stopSourceLabel; }
+    public void setStopSourceLabel(String stopSourceLabel) { this.stopSourceLabel = stopSourceLabel; }
+    public Double getManualStopPct() { return manualStopPct; }
+    public void setManualStopPct(Double manualStopPct) { this.manualStopPct = manualStopPct; }
 }

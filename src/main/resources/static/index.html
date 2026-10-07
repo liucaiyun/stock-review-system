@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>股票复盘系统</title>
-<link rel="stylesheet" href="css/app.css?v=charts2">
+<link rel="stylesheet" href="css/app.css?v=wf3">
 </head>
 <body>
 <header>
@@ -18,7 +18,7 @@
   <button data-page="plans" onclick="show('plans')">交易计划</button>
   <button data-page="strategy" onclick="show('strategy')">策略学习</button>
   <button data-page="charts" onclick="show('charts')">统计图</button>
-  <button data-page="trades" onclick="show('trades')">成交对照</button>
+  <button data-page="trades" onclick="show('trades')">成交录入</button>
   <button data-page="import" onclick="show('import')">同花顺导入</button>
 </nav>
 <div id="toastContainer"></div>
@@ -34,6 +34,11 @@
       </div>
     </h2>
     <div class="grid4" id="indexBox"></div>
+  </div>
+  <div class="card">
+    <h2>周期和环境汇总</h2>
+    <p class="hint" style="margin-top:0;">用沪深300 日K看 5/20/60 个交易日涨跌，以及收盘相对 MA20/MA60、波动（ATR）、量能。创业板近20日用来对照风格。只供复盘，不是买卖建议。</p>
+    <div id="envBox"></div>
   </div>
   <div class="card">
     <h2>今日摘要</h2>
@@ -248,19 +253,34 @@
       <div class="right"><button class="btn secondary sm" onclick="loadCharts()">刷新</button></div>
     </h2>
     <div class="grid4" id="chartKpi"></div>
-    <p class="hint">策略胜率按「信号后 5 日涨跌」回测（卖点则看下跌是否兑现）。有持仓时统计市值与浮动盈亏，有成交时统计买卖金额。</p>
+    <p class="hint">策略胜率按「信号<b>次日开盘</b>买入、持有 N 日后卖出」回测，已扣双边佣金/过户费/印花税/滑点，并与同期沪深300 对比看超额；卖点<b>不做空</b>，只统计卖完之后跌了多少（衡量离场质量）。有持仓时统计市值与浮动盈亏，有成交时统计买卖金额。</p>
   </div>
   <div class="card">
     <h2>账户净值曲线（对比沪深300）
       <div class="right"><button class="btn secondary sm" onclick="loadEquity()">刷新</button></div>
     </h2>
-    <p class="hint" style="margin-top:0;">每天在「持仓」页点一次「记今日净值」，这里才有曲线。两条线都从 1 开始，看谁跑得快。</p>
-    <div class="kpis" id="equityKpi" style="margin-bottom:12px;"></div>
+    <p class="hint" style="margin-top:0;">每天记一次账户总资产（含现金），这里才有曲线。两条线都从 1 开始，看谁跑得快。净值已<b>剔除出入金</b>：入金当天不会假跳、出金不会变成假回撤。</p>
+    <div class="row" style="align-items:flex-end;">
+      <div><label>账户总资产（含现金）</label><input type="number" id="eqAsset" min="0" step="100" placeholder="例如 200000" onkeydown="if(event.key==='Enter')snapshotEquity()"></div>
+      <div><label>今日出入金（入金填正、出金填负，没有就留空）</label><input type="number" id="eqFlow" step="100" placeholder="0"></div>
+      <div><button class="btn" onclick="snapshotEquity()">💾 记今日净值</button></div>
+    </div>
+    <div class="kpis" id="equityKpi" style="margin:12px 0;"></div>
     <div id="chartEquity" class="chart" style="height:320px;"></div>
   </div>
   <div class="grid2">
-    <div class="card"><h2>策略 5 日胜率</h2><div id="chartWin" class="chart"></div><p class="hint" id="chartWinHint" style="margin-top:8px"></p></div>
+    <div class="card"><h2>策略 5 日净胜率（扣费后）</h2><div id="chartWin" class="chart"></div><p class="hint" id="chartWinHint" style="margin-top:8px"></p></div>
     <div class="card"><h2>策略信号次数</h2><div id="chartSig" class="chart"></div></div>
+  </div>
+  <div class="grid2">
+    <div class="card"><h2>每笔期望值（R 倍数）</h2><div id="chartExpect" class="chart"></div><p class="hint" id="chartExpectHint" style="margin-top:8px"></p></div>
+    <div class="card"><h2>逐笔交易模型</h2><div id="tradeModelBox"></div></div>
+  </div>
+  <div class="card">
+    <h2>样本外验证（walk-forward）
+      <div class="right"><button class="btn secondary sm" id="wfBtn" onclick="loadWalkForward()">跑一次样本外验证</button></div>
+    </h2>
+    <div id="wfBox"><p class="hint" style="margin-top:0;">样本就是「自选股」里的股票，没有另建样本库。先到自选页加入至少 5 只，再点按钮：系统会给这些票拉日 K，把时间切成 4 段——每一折只用过去挑参数，拿去跑未来那一段。</p></div>
   </div>
   <div class="grid2">
     <div class="card"><h2>月度买卖金额</h2><div id="chartMonth" class="chart"></div></div>
@@ -269,10 +289,15 @@
   <div class="grid2">
     <div class="card"><h2>持仓浮动盈亏</h2><div id="chartHold" class="chart"></div></div>
     <div class="card">
-      <h2>最常犯的错（错题本）</h2>
-      <p class="hint" style="margin-top:0;">今日复盘页勾选的错误标签，按出现次数排序。次数最多的就是你最该改的习惯。</p>
-      <div id="chartMistake" class="chart"></div>
+      <h2>按股票已实现盈亏</h2>
+      <p class="hint" style="margin-top:0;">FIFO：只计已经卖掉的那部分成本，手里还剩的仓不算进已实现。没有成交时这里是空的。</p>
+      <div id="chartStock" class="chart"></div>
     </div>
+  </div>
+  <div class="card">
+    <h2>最常犯的错（错题本）</h2>
+    <p class="hint" style="margin-top:0;">今日复盘页勾选的错误标签，按出现次数排序。次数最多的就是你最该改的习惯。</p>
+    <div id="chartMistake" class="chart"></div>
   </div>
 </div>
 
@@ -293,8 +318,8 @@
       <div><label>成本金额</label><input id="pCostAmt" type="number" min="0" step="0.01" placeholder="数量 × 成本价" oninput="recalcPositionPrice()"></div>
     </div>
     <div class="row">
-      <div><label>纪律线幅度%（留空=默认 -8）</label><input id="pStopPct" type="number" min="0.5" max="90" step="0.5" placeholder="8 表示 -8%" title="跌破 成本×(1-幅度/100) 记破线事件。高波动ETF可放宽，慢股可收紧"></div>
-      <div></div>
+      <div><label>类别</label><select id="pAssetType"><option value="">自动识别（按代码）</option><option value="STOCK">个股</option><option value="ETF">ETF / 基金</option></select></div>
+      <div><label>纪律线幅度%（留空=2×ATR）</label><input id="pStopPct" type="number" min="0.5" max="90" step="0.5" placeholder="留空=成本−2×ATR" title="手填才用固定%。留空：成本−2×ATR(14)；没有日K才退回个股 -8% / ETF -12%"></div>
       <div></div>
     </div>
     <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
@@ -306,15 +331,39 @@
     <h2>持仓总览 <span class="sub-count" id="posCount"></span>
       <div class="right">
         <input type="number" id="posCapital" min="0" step="100" placeholder="账户总资金" title="填入账户总资金（含现金），自动算仓位占比；存在本机浏览器" style="width:110px" onchange="savePosCapital()">
-        <button class="btn secondary sm" onclick="snapshotEquity()" title="用上方总资金和当前市值记一笔今日净值，统计图页看曲线">记今日净值</button>
+        <button class="btn secondary sm" onclick="snapshotEquity()" title="用这个数字记一笔今日净值；有出入金请到「统计图 → 账户净值曲线」里填，曲线在那里看">记今日净值</button>
         <span class="sub-count" id="posQuoteAt"></span>
         <button class="btn sm" id="posRefreshBtn" onclick="refreshPositions()">更新现价</button>
       </div>
     </h2>
     <div class="grid4" id="posKpi"></div>
     <div id="posDisciplineTip"></div>
+    <div id="posReconcile"></div>
     <div id="posSectorBox"></div>
     <div id="posQuoteTip"></div>
+  </div>
+  <div class="card">
+    <h2>风险与仓位（ATR 口径）
+      <div class="right">
+        <span class="sub-count">单笔风险预算
+          <input type="number" id="riskPerTrade" min="0.1" max="5" step="0.1" value="1" style="width:56px" onchange="loadRisk(false)">%
+        </span>
+        <span class="sub-count">单票上限
+          <input type="number" id="riskMaxStock" min="5" max="100" step="5" value="25" style="width:56px" onchange="loadRisk(false)">%
+        </span>
+        <span class="sub-count">行业上限
+          <input type="number" id="riskMaxSector" min="10" max="100" step="5" value="40" style="width:56px" onchange="loadRisk(false)">%
+        </span>
+        <span class="sub-count">最多持仓
+          <input type="number" id="riskMaxPos" min="1" max="50" step="1" value="8" style="width:50px" onchange="loadRisk(false)">只
+        </span>
+        <button class="btn secondary sm" id="riskRefreshBtn" onclick="loadRisk(true)">刷新并拉行情</button>
+      </div>
+    </h2>
+    <p class="hint" style="margin-top:0;">止损不再用手填的固定 −8%：<b>1R = 2×ATR(14)</b>——同一个 −8% 对银行股是 4 个 ATR、对题材股只有 1 个 ATR，
+      实际风险差 4 倍。「单笔风险」= 股数 × 2×ATR，即跌到 ATR 止损会亏多少钱；「建议股数」按「单笔风险 = 总资金 × 上面的百分比」反推并向下取整到 100 股。
+      仓位占比用<b>总资金</b>（含现金）做分母。</p>
+    <div id="riskBox"><div class="empty">加载中…</div></div>
   </div>
   <div class="grid2">
     <div class="card"><h2>仓位占比</h2><div id="chartPosPie" class="chart"></div></div>
@@ -343,7 +392,7 @@
         <button class="btn secondary sm" onclick="loadDiscipline(true)">扫描破线</button>
       </div>
     </h2>
-    <p class="hint" style="margin-top:0;">跌破纪律线（默认 -8%，可在持仓表单里按只设置幅度）会记一条事件。破线后你只有两个选择：「执行止损」或「标记硬抗」——纪律执行率只统计做过选择的事件。硬抗结局分布（越扛越亏 vs 熬回涨回）和硬抗中的实时代价会在下方展示。</p>
+    <p class="hint" style="margin-top:0;">纪律线默认是成本 − 2×ATR(14)，只有手填幅度才用固定%。破线后选「执行止损」或「硬抗」。执行率分母含待处理（一直不点也会拉低）；同一轮硬抗不能靠反复开事件洗白；点了执行但 7 天内对不上卖出成交，会从核实后执行率里剔除。</p>
     <div class="kpis" id="discKpi"></div>
     <p class="hint" id="discHardOutcome" style="margin:4px 0 0;"></p>
     <div class="table-wrap" style="margin-top:12px;">
@@ -407,18 +456,18 @@
 <!-- 交易 -->
 <div id="trades" class="page">
   <div class="card">
-    <h2 id="tradeFormTitle">手动录入成交</h2>
-    <p class="hint" style="margin-top:0;">按笔填写买/卖。保存后会自动对照策略买/卖点。金额可手填，也可由数量×价格自动算。同花顺成交请到「同花顺导入」。</p>
+    <h2 id="tradeFormTitle">录入成交</h2>
+    <p class="hint" style="margin-top:0;">按笔填写买/卖。保存后会自动对照策略买/卖点、并和交易计划对账（执行偏差）。金额可手填，也可由数量×价格自动算。同花顺成交请到「同花顺导入」。</p>
     <input type="hidden" id="tId">
     <div class="row">
       <div><label>日期 <span style="color:var(--red)">*</span></label><input id="tDate" type="date"></div>
-      <div><label>代码 <span style="color:var(--red)">*</span></label><input id="tCode" placeholder="600519"></div>
+      <div><label>代码 <span style="color:var(--red)">*</span></label><input id="tCode" placeholder="600519" oninput="loadTradePlanOptions()"></div>
       <div><label>名称</label><input id="tName" placeholder="可手填"></div>
     </div>
     <div class="row">
       <div>
         <label>方向</label>
-        <select id="tDir"><option value="buy">买</option><option value="sell">卖</option></select>
+        <select id="tDir" onchange="loadTradePlanOptions()"><option value="buy">买</option><option value="sell">卖</option></select>
       </div>
       <div><label>数量</label><input id="tShares" type="number" step="1" oninput="recalcTradeAmount()"></div>
       <div><label>价格</label><input id="tPrice" type="number" step="0.001" oninput="recalcTradeAmount()"></div>
@@ -426,7 +475,20 @@
     </div>
     <label>备注</label>
     <input id="tNote" placeholder="例如：突破加仓 / 止损">
-    <label class="plan-check"><input type="checkbox" id="tWritePlan" checked> 买入时同时写入交易计划（用下方止损/目标/天数）</label>
+    <div class="row" id="tPlanLinkRow">
+      <div style="grid-column:span 2">
+        <label>关联交易计划（买入时）</label>
+        <select id="tPlanPick" onchange="onPlanPickChange()">
+          <option value="">— 该股票没有进行中的计划 —</option>
+        </select>
+      </div>
+      <div style="display:flex;align-items:flex-end">
+        <label class="plan-check" style="margin:0"><input type="checkbox" id="tWritePlan"> 没有就新建一条（用下面的止损/目标/天数）</label>
+      </div>
+    </div>
+    <p class="hint" style="margin-top:2px"><span id="tPlanPickTip"></span><br>
+      选一条已有计划 → 这笔买入会挂到它上面（执行偏差报表就能精确配对，不用靠日期猜）。
+      没有计划时勾上「新建」，止损价务必填——<b>没有止损价的计划算不出 R</b>。</p>
     <div class="row" id="tPlanRow">
       <div><label>止损价</label><input id="tStop" type="number" step="0.001" placeholder="可空"></div>
       <div><label>目标价</label><input id="tTarget" type="number" step="0.001" placeholder="可空"></div>
@@ -444,6 +506,15 @@
     <p class="hint" style="margin-top:0;">用全部 7 条常用策略的买/卖点，对照你实际成交：当天打中、信号后追、提前做、偏晚，还是靠近反向信号。用于复盘纪律，不是买卖建议。</p>
     <div class="kpis" id="tradeCompareKpi"></div>
     <p class="hint" id="tradeCompareSummary"></p>
+  </div>
+  <div class="card">
+    <h2>执行偏差（计划 → 成交闭环）
+      <span class="right"><button class="btn sm secondary" type="button" onclick="loadExecution()">刷新</button></span>
+    </h2>
+    <p class="hint" style="margin-top:0;">用成交流水还原你真实做过的每一笔（买入建仓 → 全部卖出），再和交易计划逐项对照：
+      <b>追高入场、超过计划止损、亏损加仓</b>这三项能折成钱；未达目标、超期持有只标差距。
+      「已执行止损」必须能在流水里找到对应卖出才算核实通过——执行率不该由自报决定。</p>
+    <div id="executionBox"><div class="empty">加载中…</div></div>
   </div>
   <div class="card">
     <h2>成交列表</h2>
@@ -466,7 +537,7 @@
     <div class="alert warn">同花顺<strong>没有</strong>对个人账号开放官方登录/持仓 API，第三方程序不能安全地用你的同花顺账号密码去拉券商持仓。本系统采用可行替代：</div>
     <ol class="guide">
       <li>行情与 K 线：东方财富公开行情（沪深京 A 股/ETF），用于策略买卖点。</li>
-      <li>手动录入：到「持仓」记数量和成本，到「成交对照」记买卖流水，不连同花顺也能用。</li>
+      <li>手动录入：到「持仓」记数量和成本，到「成交录入」记买卖流水，不连同花顺也能用。</li>
       <li>批量导入：同花顺客户端 交易 → 查询 → 成交 → 导出 CSV，在本页导入。</li>
     </ol>
     <p class="hint">表头需能识别：成交日期、证券代码、操作/买卖标志；数量、价格、金额、名称会尽量自动匹配。编码支持 GBK / UTF-8。</p>
@@ -480,8 +551,8 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"></script>
-<script src="js/api.js?v=charts2"></script>
-<script src="js/charts.js?v=charts2"></script>
-<script src="js/app.js?v=charts2"></script>
+<script src="js/api.js?v=wf3"></script>
+<script src="js/charts.js?v=wf3"></script>
+<script src="js/app.js?v=wf3"></script>
 </body>
 </html>

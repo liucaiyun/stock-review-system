@@ -89,16 +89,22 @@ public class QuoteClient {
     private final Cache<String, BoardProfile> boardCache;
     private final Cache<String, RelativeStrength> rsCache;
     private final Cache<String, List<IndustryBoard>> industryCache;
-    private final Semaphore httpPermits = new Semaphore(3);
+    private static final List<String> INDEX_SECIDS = List.of("1.000001", "0.399001", "0.399006", "1.000300");
+    private static final String INDEX_CACHE_KEY = "idx:main";
+    private final Object indexLock = new Object();
+    private final Semaphore httpPermits = new Semaphore(4);
+    private final KlineStore klineStore;
 
     public QuoteClient(ObjectMapper objectMapper,
                        @Value("${stock.quote.connect-timeout-ms:8000}") int connectTimeoutMs,
-                       @Value("${stock.quote.read-timeout-ms:12000}") int readTimeoutMs) {
+                       @Value("${stock.quote.read-timeout-ms:12000}") int readTimeoutMs,
+                       KlineStore klineStore) {
         this.objectMapper = objectMapper;
         this.connectTimeoutMs = connectTimeoutMs;
         this.readTimeoutMs = readTimeoutMs;
+        this.klineStore = klineStore;
         this.klineCache = Caffeine.newBuilder()
-                .expireAfterWrite(5, TimeUnit.MINUTES)
+                .expireAfterWrite(6, TimeUnit.HOURS)
                 .maximumSize(400)
                 .build();
         this.suggestCache = Caffeine.newBuilder()
@@ -196,10 +202,11 @@ public class QuoteClient {
             throw new IllegalStateException("拉取K线失败：" + (last == null ? "无数据" : last.getMessage()), last);
         }
         klineCache.put(cacheKey, bars);
+        persistKline(secid, bars);
         return bars;
     }
 
-    /** 只读缓存，不访问行情。统计总览用，避免 30+ 只自选把页面卡住。 */
+    /** 只读：内存 → 落盘。统计总览 / walk-forward / ATR 纪律线用，不打行情。 */
     public List<KlineBar> peekKline(String secid) {
         if (secid == null || secid.isBlank()) {
             return List.of();
@@ -210,7 +217,24 @@ public class QuoteClient {
                 return cached;
             }
         }
+        if (klineStore != null) {
+            List<KlineBar> stored = klineStore.load(secid);
+            if (stored.size() >= 15) {
+                klineCache.put(secid + "|" + stored.size(), stored);
+                return stored;
+            }
+        }
         return List.of();
+    }
+
+    private void persistKline(String secid, List<KlineBar> bars) {
+        if (klineStore == null || bars == null || bars.isEmpty()) {
+            return;
+        }
+        try {
+            klineStore.save(secid, bars);
+        } catch (Exception ignored) {
+        }
     }
 
     /** 只读报价缓存。统计页用，缓存没有就返回空，不打东财。 */
@@ -288,13 +312,13 @@ public class QuoteClient {
         Map<String, QuoteSnapshot> merged = new LinkedHashMap<>();
         Exception last = null;
         try {
-            mergeQuotes(merged, fetchEastMoneyQuotes(ids));
+            mergeQuotes(merged, fetchTencentQuotes(ids));
         } catch (Exception ex) {
             last = ex;
         }
         if (missingPrice(merged, ids)) {
             try {
-                mergeQuotes(merged, fetchTencentQuotes(ids));
+                mergeQuotes(merged, fetchEastMoneyQuotes(ids));
             } catch (Exception ex) {
                 last = ex;
             }
@@ -320,7 +344,78 @@ public class QuoteClient {
     }
 
     public List<QuoteSnapshot> fetchIndices() {
-        return fetchQuotes(List.of("1.000001", "0.399001", "0.399006", "1.000300"));
+        List<QuoteSnapshot> cached = quoteCache.getIfPresent(INDEX_CACHE_KEY);
+        if (cached != null && !cached.isEmpty()) {
+            return cached;
+        }
+        synchronized (indexLock) {
+            cached = quoteCache.getIfPresent(INDEX_CACHE_KEY);
+            if (cached != null && !cached.isEmpty()) {
+                return cached;
+            }
+            Map<String, QuoteSnapshot> merged = new LinkedHashMap<>();
+            Exception last = null;
+            try {
+                mergeQuotes(merged, fetchTencentQuotes(INDEX_SECIDS));
+            } catch (Exception ex) {
+                last = ex;
+            }
+            if (missingPrice(merged, INDEX_SECIDS)) {
+                try {
+                    mergeQuotes(merged, fetchEastMoneyQuotes(INDEX_SECIDS));
+                } catch (Exception ex) {
+                    last = ex;
+                }
+            }
+            if (missingPrice(merged, INDEX_SECIDS)) {
+                try {
+                    mergeQuotes(merged, fetchSinaQuotes(INDEX_SECIDS));
+                } catch (Exception ex) {
+                    last = ex;
+                }
+            }
+            List<QuoteSnapshot> list = new ArrayList<>();
+            for (QuoteSnapshot q : merged.values()) {
+                if (q == null) {
+                    continue;
+                }
+                list.add(new QuoteSnapshot(
+                        q.code(),
+                        indexDisplayName(q.code(), q.name()),
+                        q.secid(),
+                        q.market(),
+                        q.price(),
+                        q.change(),
+                        q.pctChange(),
+                        q.volume(),
+                        q.amount()
+                ));
+            }
+            if (list.isEmpty()) {
+                throw new IllegalStateException("拉取指数失败：" + (last == null ? "无数据" : last.getMessage()), last);
+            }
+            quoteCache.put(INDEX_CACHE_KEY, list);
+            quoteCache.put(String.join(",", INDEX_SECIDS), list);
+            for (QuoteSnapshot q : list) {
+                if (q.secid() != null && !q.secid().isBlank()) {
+                    quoteCache.put(q.secid(), List.of(q));
+                }
+            }
+            return list;
+        }
+    }
+
+    private static String indexDisplayName(String code, String name) {
+        if (name != null && !name.isBlank() && !name.contains("?")) {
+            return name;
+        }
+        return switch (code == null ? "" : code) {
+            case "000001" -> "上证指数";
+            case "399001" -> "深证成指";
+            case "399006" -> "创业板指";
+            case "000300" -> "沪深300";
+            default -> name;
+        };
     }
 
     /** 只读板块缓存。 */
@@ -879,8 +974,7 @@ public class QuoteClient {
         JsonNode root = getJson(String.format(ULIST_URL, joined));
         JsonNode diff = root.path("data").path("diff");
         List<QuoteSnapshot> list = new ArrayList<>();
-        if (diff.isArray()) {
-            for (JsonNode n : diff) {
+        for (JsonNode n : eachDiff(diff)) {
                 String code = text(n, "f12");
                 Integer marketNo = n.path("f13").isNumber() ? n.path("f13").asInt() : null;
                 String market = (marketNo != null && marketNo == 1) ? "SH" : MarketCodeUtil.inferMarket(code);
@@ -899,7 +993,6 @@ public class QuoteClient {
                         decimal(n, "f5"),
                         decimal(n, "f6")
                 ));
-            }
         }
         return list;
     }
@@ -1025,7 +1118,7 @@ public class QuoteClient {
         }
         try {
             double v = Double.parseDouble(s.trim());
-            return v == 0 ? null : v;
+            return v;
         } catch (NumberFormatException ex) {
             return null;
         }
@@ -1121,7 +1214,7 @@ public class QuoteClient {
     private String httpGet(String url, Charset charset, String referer) throws Exception {
         boolean acquired = false;
         try {
-            acquired = httpPermits.tryAcquire(80, TimeUnit.MILLISECONDS);
+            acquired = httpPermits.tryAcquire(8, TimeUnit.SECONDS);
             if (!acquired) {
                 throw new IllegalStateException("行情请求繁忙，请稍后刷新");
             }

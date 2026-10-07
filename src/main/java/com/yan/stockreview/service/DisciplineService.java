@@ -2,9 +2,13 @@ package com.yan.stockreview.service;
 
 import com.yan.stockreview.dto.QuoteSnapshot;
 import com.yan.stockreview.entity.DisciplineEvent;
+import com.yan.stockreview.entity.TradeRecord;
 import com.yan.stockreview.entity.WatchStock;
 import com.yan.stockreview.market.QuoteClient;
 import com.yan.stockreview.repository.DisciplineEventRepository;
+import com.yan.stockreview.repository.TradeRecordRepository;
+import com.yan.stockreview.strategy.IndicatorEngine;
+import com.yan.stockreview.strategy.StopRules;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -31,12 +35,14 @@ public class DisciplineService {
     private final DisciplineEventRepository repository;
     private final WatchlistService watchlistService;
     private final QuoteClient quoteClient;
+    private final TradeRecordRepository tradeRecordRepository;
 
     public DisciplineService(DisciplineEventRepository repository, WatchlistService watchlistService,
-                             QuoteClient quoteClient) {
+                             QuoteClient quoteClient, TradeRecordRepository tradeRecordRepository) {
         this.repository = repository;
         this.watchlistService = watchlistService;
         this.quoteClient = quoteClient;
+        this.tradeRecordRepository = tradeRecordRepository;
     }
 
     public List<DisciplineEvent> list() {
@@ -49,12 +55,11 @@ public class DisciplineService {
 
     /**
      * 扫描全部持仓：
-     * 破线且无 OPEN 事件 → 新建事件；
+     * 破线且无 OPEN、且不是「同一轮硬抗仍在线下」→ 新建事件；
      * 破线已有 OPEN 事件 → 保持；
      * 涨回线上 → 标 RECOVERED；
      * 持仓已清零但事件未处理 → 标 CLOSED_POS。
      */
-    @Transactional
     public Map<String, Object> scan() {
         List<WatchStock> holdings = watchlistService.list();
         Map<String, QuoteSnapshot> quotes = new HashMap<>();
@@ -85,6 +90,10 @@ public class DisciplineService {
             if (holding && price != null) {
                 double stopLine = stopLineOf(s);
                 if (price < stopLine && open == null) {
+                    var last = repository.findFirstByCodeOrderByIdDesc(s.getCode()).orElse(null);
+                    if (sameBreach(last, LocalDate.now()) || hardHoldStillBroken(last, price, stopLine)) {
+                        continue;
+                    }
                     DisciplineEvent ev = new DisciplineEvent();
                     ev.setCode(s.getCode());
                     ev.setName(s.getName());
@@ -114,6 +123,16 @@ public class DisciplineService {
         out.put("closed", closed);
         out.put("open", repository.countByStatus("OPEN"));
         return out;
+    }
+
+    /** 同一天已经记过破线（不论当时点了执行还是硬抗），不再开新事件。 */
+    private static boolean sameBreach(DisciplineEvent last, LocalDate today) {
+        return last != null && today.equals(last.getTriggerDate());
+    }
+
+    /** 选择硬抗后仍在线下：这是同一轮破线，不能再开一条把执行率洗白。 */
+    private static boolean hardHoldStillBroken(DisciplineEvent last, double price, double stopLine) {
+        return last != null && "IGNORED".equals(last.getStatus()) && price < stopLine;
     }
 
     /** 手动处理：EXECUTED=执行了止损 / IGNORED=选择硬抗 */
@@ -164,10 +183,25 @@ public class DisciplineService {
         return null;
     }
 
-    /** 某只持仓的纪律线 = 成本价 × (1 - 幅度/100)，幅度默认 -8% */
-    private static double stopLineOf(WatchStock s) {
-        double pct = s.getStopPct() == null ? DEFAULT_STOP_PCT : s.getStopPct();
-        return s.getCostPrice() * (1 - pct / 100);
+    /** 纪律线：手填幅度 > 成本−2×ATR > 默认%。 */
+    private double stopLineOf(WatchStock s) {
+        if (s.getCostPrice() == null || s.getCostPrice() <= 0) {
+            return 0;
+        }
+        Double atr = null;
+        if (s.getSecid() != null) {
+            var bars = quoteClient.peekKline(s.getSecid());
+            if (bars.size() >= StopRules.ATR_PERIOD + 1) {
+                double[] a = IndicatorEngine.atr(bars, StopRules.ATR_PERIOD);
+                double last = a[a.length - 1];
+                if (!Double.isNaN(last) && last > 0) {
+                    atr = last;
+                }
+            }
+        }
+        boolean etf = "ETF".equals(WatchlistService.effectiveAssetType(s));
+        var stop = StopRules.of(s.getCostPrice(), s.getStopPct(), etf, atr);
+        return stop == null ? 0 : stop.stopLine();
     }
 
     /**
@@ -267,7 +301,21 @@ public class DisciplineService {
         out.put("recovered", recovered);
         out.put("closedPos", closedPos);
         long decided = executed + ignored;
-        out.put("executeRate", decided == 0 ? null : round(executed * 100.0 / decided, 1));
+        long denom = decided + open;
+        out.put("executeRate", denom == 0 ? null : round(executed * 100.0 / denom, 1));
+        out.put("decidedRate", decided == 0 ? null : round(executed * 100.0 / decided, 1));
+        out.put("unansweredCount", open);
+        int unverified = 0;
+        for (DisciplineEvent ev : all) {
+            if ("EXECUTED".equals(ev.getStatus()) && !hasMatchingSell(ev)) {
+                unverified++;
+            }
+        }
+        out.put("unverifiedExecuted", unverified);
+        out.put("verifiedExecuted", Math.max(0, executed - unverified));
+        long verifiedDenom = Math.max(0, executed - unverified) + ignored + open;
+        out.put("verifiedExecuteRate", verifiedDenom == 0 ? null
+                : round(Math.max(0, executed - unverified) * 100.0 / verifiedDenom, 1));
         out.put("avgExecutedDays", executed == 0 ? null : round(executedDaysSum * 1.0 / executed, 1));
         out.put("avgIgnoredDays", ignored == 0 ? null : round(ignoredDaysSum * 1.0 / ignored, 1));
         out.put("avgIgnoredExtraLoss", ignoredLossN == 0 ? null : round(ignoredLossSum / ignoredLossN, 2));
@@ -312,5 +360,23 @@ public class DisciplineService {
     private static double round(double v, int scale) {
         double p = Math.pow(10, scale);
         return Math.round(v * p) / p;
+    }
+
+    /** 「已执行止损」必须能对上破线日后 7 天内的卖出成交，否则算自报。 */
+    private boolean hasMatchingSell(DisciplineEvent ev) {
+        if (ev.getCode() == null || ev.getTriggerDate() == null) {
+            return false;
+        }
+        LocalDate from = ev.getTriggerDate();
+        LocalDate to = from.plusDays(7);
+        for (TradeRecord t : tradeRecordRepository.findByCodeOrderByTradeDateAscIdAsc(ev.getCode())) {
+            if (t.getTradeDate() == null || !"sell".equalsIgnoreCase(t.getDirection())) {
+                continue;
+            }
+            if (!t.getTradeDate().isBefore(from) && !t.getTradeDate().isAfter(to)) {
+                return true;
+            }
+        }
+        return false;
     }
 }

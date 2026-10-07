@@ -2,6 +2,7 @@ package com.yan.stockreview.service;
 
 import com.yan.stockreview.entity.DailyReview;
 import com.yan.stockreview.entity.TradeRecord;
+import com.yan.stockreview.strategy.LotLedger;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -53,14 +54,32 @@ public class StatsChartService {
             }
         }
         Map<String, List<TradeRecord>> byCode = new LinkedHashMap<>();
-        List<TradeRecord> chrono = new ArrayList<>(trades);
+        List<TradeRecord> chrono = new ArrayList<>();
+        for (TradeRecord t : trades) {
+            if (t.getTradeDate() != null) {
+                chrono.add(t);
+            }
+        }
         chrono.sort((a, b) -> {
             int c = a.getTradeDate().compareTo(b.getTradeDate());
-            return c != 0 ? c : Long.compare(a.getId(), b.getId());
+            if (c != 0) {
+                return c;
+            }
+            long ida = a.getId() == null ? 0L : a.getId();
+            long idb = b.getId() == null ? 0L : b.getId();
+            return Long.compare(ida, idb);
         });
         for (TradeRecord t : chrono) {
             byCode.computeIfAbsent(t.getCode(), k -> new ArrayList<>()).add(t);
         }
+        List<LotLedger.Fill> fills = new ArrayList<>();
+        for (TradeRecord t : chrono) {
+            if (t.getShares() == null || t.getShares() <= 0 || t.getPrice() == null || t.getPrice() <= 0) {
+                continue;
+            }
+            fills.add(new LotLedger.Fill(t.getCode(), t.getDirection(), t.getShares(), t.getPrice(), t.getAmount()));
+        }
+        Map<String, LotLedger.CodeState> ledger = LotLedger.replay(fills);
         List<Map<String, Object>> stockStats = new ArrayList<>();
         for (Map.Entry<String, List<TradeRecord>> e : byCode.entrySet()) {
             double cost = 0;
@@ -71,12 +90,16 @@ public class StatsChartService {
                 if ("buy".equals(t.getDirection())) cost += amt;
                 else income += amt;
             }
+            LotLedger.CodeState st = ledger.get(e.getKey());
+            double realized = st == null ? 0 : st.realized();
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("code", e.getKey());
             row.put("name", name);
             row.put("buyAmount", round(cost));
             row.put("sellAmount", round(income));
-            row.put("realized", round(income - cost));
+            row.put("realized", round(realized));
+            row.put("remainingShares", st == null ? 0 : st.remainingShares());
+            row.put("remainingCost", st == null ? 0 : st.remainingCost());
             row.put("trades", e.getValue().size());
             stockStats.add(row);
         }
@@ -88,6 +111,9 @@ public class StatsChartService {
         List<Integer> sentiments = new ArrayList<>();
         Map<String, Integer> mistakeCount = new LinkedHashMap<>();
         for (DailyReview r : reviews) {
+            if (r.getReviewDate() == null) {
+                continue;
+            }
             reviewDates.add(r.getReviewDate().toString());
             sentiments.add(r.getSentiment() == null ? 3 : r.getSentiment());
             if (r.getMistakeTags() != null && !r.getMistakeTags().isBlank()) {
@@ -115,7 +141,7 @@ public class StatsChartService {
         map.put("sellAmount", round(sellAmt));
         map.put("dirCount", dirCount);
         map.put("months", mergeMonths(monthlyBuy, monthlySell));
-        map.put("stockStats", stockStats.size() > 12 ? stockStats.subList(0, 12) : stockStats);
+        map.put("stockStats", stockStats.size() > 12 ? new ArrayList<>(stockStats.subList(0, 12)) : stockStats);
         map.put("reviewDates", reviewDates);
         map.put("sentiments", sentiments);
         map.put("mistakes", mistakes);
@@ -130,7 +156,7 @@ public class StatsChartService {
         map.put("positionPl", positions.getTotalPl());
         map.put("positionPlPct", positions.getTotalPlPct());
         map.put("positions", positions.getItems());
-        map.put("from", trades.isEmpty() ? null : chrono.get(0).getTradeDate());
+        map.put("from", chrono.isEmpty() ? null : chrono.get(0).getTradeDate());
         map.put("to", LocalDate.now());
         return map;
     }

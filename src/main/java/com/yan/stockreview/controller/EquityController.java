@@ -21,13 +21,14 @@ public class EquityController {
         this.equityService = equityService;
     }
 
-    /** 记一笔今日净值：totalAsset=账户总资金（含现金） */
+    /** 记一笔今日净值：totalAsset=账户总资产（含现金），cashFlow=当日出入金（正=入金，负=出金） */
     @PostMapping("/snapshot")
     public EquitySnapshot snapshot(@RequestBody SnapshotRequest req) {
-        return equityService.snapshot(req == null ? null : req.totalAsset, req == null ? null : req.note);
+        return equityService.snapshot(req == null ? null : req.totalAsset,
+                req == null ? null : req.cashFlow, req == null ? null : req.note);
     }
 
-    /** 净值曲线 + 最大回撤 + 对比沪深300 */
+    /** 净值曲线（剔除出入金）+ 最大回撤 + 对比沪深300 + 超额/年化/夏普 */
     @GetMapping("/curve")
     public Map<String, Object> curve() {
         return equityService.curve();
@@ -41,6 +42,7 @@ public class EquityController {
 
     public static class SnapshotRequest {
         public Double totalAsset;
+        public Double cashFlow;
         public String note;
     }
 }

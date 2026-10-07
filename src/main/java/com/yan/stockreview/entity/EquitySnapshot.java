@@ -32,6 +32,12 @@ public class EquitySnapshot {
     /** 现金 = 总资金 - 持仓市值 */
     private Double cash;
 
+    /**
+     * 当日出入金：正数 = 入金，负数 = 出金，null/0 = 没有资金进出。
+     * 只有记了它，净值曲线才能把「追加/抽走资金」从收益里剔掉，否则入金当天净值会假跳、出金会变成假回撤。
+     */
+    private Double cashFlow;
+
     @Column(length = 200)
     private String note;
 
@@ -52,6 +58,8 @@ public class EquitySnapshot {
     public void setPositionValue(Double positionValue) { this.positionValue = positionValue; }
     public Double getCash() { return cash; }
     public void setCash(Double cash) { this.cash = cash; }
+    public Double getCashFlow() { return cashFlow; }
+    public void setCashFlow(Double cashFlow) { this.cashFlow = cashFlow; }
     public String getNote() { return note; }
     public void setNote(String note) { this.note = note; }
     public LocalDateTime getCreatedAt() { return createdAt; }

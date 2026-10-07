@@ -2,6 +2,7 @@ package com.yan.stockreview.service;
 
 import com.yan.stockreview.dto.BoardProfile;
 import com.yan.stockreview.dto.BoardTreeNode;
+import com.yan.stockreview.dto.KlineBar;
 import com.yan.stockreview.dto.PositionOverview;
 import com.yan.stockreview.dto.PositionRow;
 import com.yan.stockreview.dto.QuoteSnapshot;
@@ -13,6 +14,8 @@ import com.yan.stockreview.market.MarketCodeUtil;
 import com.yan.stockreview.market.QuoteClient;
 import com.yan.stockreview.repository.TradePlanRepository;
 import com.yan.stockreview.repository.WatchStockRepository;
+import com.yan.stockreview.strategy.IndicatorEngine;
+import com.yan.stockreview.strategy.StopRules;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -27,8 +30,44 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 public class WatchlistService {
 
-    /** 默认纪律线幅度：-8% */
+    /** 个股默认纪律线幅度：-8% */
     public static final double DEFAULT_STOP_PCT = 8.0;
+    /** ETF 默认纪律线幅度：-12%（ETF波动更钝，-8%过于敏感） */
+    public static final double DEFAULT_STOP_PCT_ETF = 12.0;
+
+    /** 按代码规则识别 ETF/基金：沪市 5 开头（50/51/52/56/58 全是基金），深市 15/16/18 开头 */
+    public static boolean isEtfCode(String code) {
+        if (code == null || code.length() != 6) {
+            return false;
+        }
+        if (code.startsWith("5")) {
+            return true;   // 沪市基金：50/51/52/56/58 开头（ETF/LOF/封基）
+        }
+        return code.startsWith("15") || code.startsWith("16") || code.startsWith("18");
+    }
+
+    /** 生效资产类别：显式设置优先，否则按代码自动识别 */
+    public static String effectiveAssetType(WatchStock s) {
+        if (s.getAssetType() != null && !s.getAssetType().isBlank()) {
+            String v = s.getAssetType().trim().toUpperCase();
+            if (v.equals("ETF") || v.equals("STOCK")) {
+                return v;
+            }
+        }
+        return isEtfCode(s.getCode()) ? "ETF" : "STOCK";
+    }
+
+    /** 生效纪律线幅度：手动设置优先；未设置时个股 -8%、ETF -12% */
+    public static double effectiveStopPct(WatchStock s) {
+        if (s.getStopPct() != null) {
+            return s.getStopPct();
+        }
+        return "ETF".equals(effectiveAssetType(s)) ? DEFAULT_STOP_PCT_ETF : DEFAULT_STOP_PCT;
+    }
+
+    public static String assetTypeLabel(String assetType) {
+        return "ETF".equals(assetType) ? "ETF" : "个股";
+    }
 
     private final WatchStockRepository watchStockRepository;
     private final QuoteClient quoteClient;
@@ -87,6 +126,7 @@ public class WatchlistService {
         exist.setMarket(incoming.getMarket());
         exist.setSecid(incoming.getSecid());
         exist.setNotes(incoming.getNotes());
+        exist.setAssetType(resolveAssetType(req, incoming.getCode()));
         // 自选页编辑：填了才更新纪律线，留空保留原值（持仓页保存则以表单为准）
         if (req.getStopPct() != null) {
             exist.setStopPct(normalizeStopPct(req.getStopPct()));
@@ -131,13 +171,14 @@ public class WatchlistService {
         exist.setName(incoming.getName());
         exist.setMarket(incoming.getMarket());
         exist.setSecid(incoming.getSecid());
+        exist.setAssetType(resolveAssetType(req, incoming.getCode()));
         if (req.getNotes() != null) {
             exist.setNotes(incoming.getNotes());
         }
         exist.setShares(incoming.getShares());
         exist.setCostPrice(incoming.getCostPrice());
         exist.setCostAmount(incoming.getCostAmount());
-        // 持仓页保存时始终以表单值为准（留空 = 恢复默认 -8%）
+        // 持仓页保存时始终以表单值为准（留空 = 按类别恢复默认：个股 -8% / ETF -12%）
         exist.setStopPct(normalizeStopPct(req.getStopPct()));
         return watchStockRepository.save(exist);
     }
@@ -190,6 +231,8 @@ public class WatchlistService {
         double totalCost = 0;
         double totalMarket = 0;
         double totalPl = 0;
+        double quotedCost = 0;
+        double quotedPl = 0;
         int quotedCount = 0;
         for (WatchStock s : holdings) {
             QuoteSnapshot q = qmap.get(s.getCode());
@@ -207,6 +250,12 @@ public class WatchlistService {
             if (row.getFloatPl() != null) {
                 totalPl += row.getFloatPl();
             }
+            if (row.getPrice() != null && row.getCostAmount() != null) {
+                quotedCost += row.getCostAmount();
+                if (row.getFloatPl() != null) {
+                    quotedPl += row.getFloatPl();
+                }
+            }
         }
         if (totalMarket > 0) {
             for (PositionRow row : rows) {
@@ -222,7 +271,7 @@ public class WatchlistService {
         overview.setTotalCost(round2(totalCost));
         overview.setTotalMarket(round2(totalMarket));
         overview.setTotalPl(round2(totalPl));
-        overview.setTotalPlPct(totalCost > 0 ? round2(totalPl / totalCost * 100) : null);
+        overview.setTotalPlPct(quotedCost > 0 ? round2(quotedPl / quotedCost * 100) : null);
         fillDisciplineAndConcentration(overview, rows, totalMarket);
         overview.setQuotedCount(quotedCount);
         overview.setQuotedAt(LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")));
@@ -288,30 +337,95 @@ public class WatchlistService {
         if (list.isEmpty()) {
             return List.of();
         }
-        return quoteClient.fetchQuotes(list.stream().map(WatchStock::getSecid).toList());
+        List<String> secids = list.stream()
+                .map(WatchStock::getSecid)
+                .filter(s -> s != null && !s.isBlank())
+                .toList();
+        Map<String, QuoteSnapshot> byCode = new LinkedHashMap<>();
+        try {
+            for (QuoteSnapshot q : quoteClient.fetchQuotes(secids)) {
+                if (q != null && q.code() != null) {
+                    byCode.put(q.code(), q);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        if (byCode.size() < list.size()) {
+            for (QuoteSnapshot q : quoteClient.cachedQuotes(secids)) {
+                if (q != null && q.code() != null) {
+                    byCode.putIfAbsent(q.code(), q);
+                }
+            }
+        }
+        List<QuoteSnapshot> out = new ArrayList<>();
+        for (WatchStock s : list) {
+            QuoteSnapshot q = byCode.get(s.getCode());
+            if (q == null || q.price() == null) {
+                QuoteSnapshot fromK = quoteFromKline(s);
+                if (fromK != null) {
+                    q = fromK;
+                }
+            }
+            if (q != null) {
+                out.add(q);
+            }
+        }
+        return out;
+    }
+
+    /** 现价拉不到时，用已缓存日 K 的最近收盘和涨跌幅顶上，避免自选表全是横杠。 */
+    private QuoteSnapshot quoteFromKline(WatchStock s) {
+        if (s == null || s.getSecid() == null || s.getSecid().isBlank()) {
+            return null;
+        }
+        List<KlineBar> bars = quoteClient.peekKline(s.getSecid());
+        if (bars.isEmpty()) {
+            return null;
+        }
+        KlineBar last = bars.get(bars.size() - 1);
+        Double change = null;
+        if (bars.size() >= 2) {
+            change = last.close() - bars.get(bars.size() - 2).close();
+        }
+        return new QuoteSnapshot(s.getCode(), s.getName(), s.getSecid(), s.getMarket(),
+                last.close(), change, last.pctChange(), last.volume(), last.amount());
     }
 
     public Map<String, Object> boardView() {
         List<WatchStock> stocks = list();
         Map<String, QuoteSnapshot> quotes = new HashMap<>();
-        try {
-            if (!stocks.isEmpty()) {
-                for (QuoteSnapshot q : quoteClient.fetchQuotes(stocks.stream().map(WatchStock::getSecid).toList())) {
-                    if (q != null && q.code() != null) {
-                        quotes.put(q.code(), q);
-                    }
-                }
+        List<String> secids = stocks.stream()
+                .map(WatchStock::getSecid)
+                .filter(s -> s != null && !s.isBlank())
+                .toList();
+        for (QuoteSnapshot q : quoteClient.cachedQuotes(secids)) {
+            if (q != null && q.code() != null) {
+                quotes.put(q.code(), q);
             }
-        } catch (Exception ignored) {
         }
         List<Map<String, Object>> items = new ArrayList<>();
-        List<QuoteClient.WatchKey> keys = stocks.stream()
-                .map(s -> new QuoteClient.WatchKey(s.getCode(), s.getMarket(), s.getSecid()))
-                .toList();
-        Map<String, BoardProfile> profiles = quoteClient.fetchBoardProfiles(keys);
+        int liveBoards = 0;
+        final int maxLiveBoards = 4;
         for (WatchStock stock : stocks) {
-            BoardProfile board = profiles.getOrDefault(stock.getCode(), new BoardProfile());
+            BoardProfile board = quoteClient.peekBoard(stock.getCode());
+            if (board == null && liveBoards < maxLiveBoards
+                    && stock.getSecid() != null && !stock.getSecid().isBlank()) {
+                try {
+                    board = quoteClient.fetchBoardProfile(stock.getCode(), stock.getMarket(), stock.getSecid());
+                    liveBoards++;
+                } catch (Exception ignored) {
+                }
+            }
+            if (board == null) {
+                board = new BoardProfile();
+            }
             QuoteSnapshot q = quotes.get(stock.getCode());
+            if (q == null || q.price() == null) {
+                QuoteSnapshot fromK = quoteFromKline(stock);
+                if (fromK != null) {
+                    q = fromK;
+                }
+            }
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("id", stock.getId());
             row.put("code", stock.getCode());
@@ -322,11 +436,9 @@ public class WatchlistService {
             row.put("price", q == null ? null : q.price());
             row.put("pctChange", q == null ? null : q.pctChange());
             row.put("boards", board);
-            try {
-                RelativeStrength rs = quoteClient.relativeStrength(stock.getCode(), stock.getMarket(),
-                        stock.getSecid(), q == null ? null : q.pctChange());
+            RelativeStrength rs = quoteClient.peekRs(stock.getCode());
+            if (rs != null) {
                 row.put("strength", rs);
-            } catch (Exception ignored) {
             }
             items.add(row);
         }
@@ -462,6 +574,7 @@ public class WatchlistService {
         }
         stock.setName(name.isEmpty() ? parsed.code() : name);
         stock.setNotes(req.getNotes());
+        stock.setAssetType(resolveAssetType(req, stock.getCode()));
         stock.setStopPct(normalizeStopPct(req.getStopPct()));
         applyPosition(stock, req);
         return stock;
@@ -492,6 +605,9 @@ public class WatchlistService {
         row.setName(s.getName());
         row.setMarket(s.getMarket());
         row.setNotes(s.getNotes());
+        String assetType = effectiveAssetType(s);
+        row.setAssetType(assetType);
+        row.setAssetTypeLabel(assetTypeLabel(assetType));
         row.setShares(s.getShares());
         row.setCostPrice(s.getCostPrice());
         Double costAmount = s.getCostAmount();
@@ -504,6 +620,12 @@ public class WatchlistService {
             row.setPctChange(q.pctChange());
             if (q.name() != null && (row.getName() == null || row.getName().isBlank() || row.getName().equals(row.getCode()))) {
                 row.setName(q.name());
+            }
+        } else if (!network && s.getSecid() != null && !s.getSecid().isBlank()) {
+            // 现价缓存只有 20 秒，统计图/提醒不能因此把市值显示成 0；日 K 缓存更久，用最近收盘兜底
+            List<KlineBar> bars = quoteClient.peekKline(s.getSecid());
+            if (!bars.isEmpty()) {
+                row.setPrice(bars.get(bars.size() - 1).close());
             }
         }
         try {
@@ -527,15 +649,21 @@ public class WatchlistService {
         if (row.getFloatPl() != null && row.getCostAmount() != null && row.getCostAmount() != 0) {
             row.setFloatPlPct(round2(row.getFloatPl() / row.getCostAmount() * 100));
         }
-        // 纪律止损线：成本价 × (1 - 幅度/100)，幅度默认 8（-8%），可按持仓单独设置
+        // 纪律止损线：手填幅度优先，否则成本 − 2×ATR；再没有 ATR 才用默认 %
         if (s.getCostPrice() != null && s.getCostPrice() > 0) {
-            double pct = s.getStopPct() == null ? DEFAULT_STOP_PCT : s.getStopPct();
-            double stopLine = Math.round(s.getCostPrice() * (1 - pct / 100) * 1000) / 1000.0;
-            row.setStopPct(pct);
-            row.setStopLine(stopLine);
-            if (row.getPrice() != null) {
-                row.setStopBroken(row.getPrice() < stopLine);
-                row.setStopDistancePct(round2((row.getPrice() - stopLine) / stopLine * 100));
+            boolean etf = "ETF".equals(assetType);
+            Double atr = lastAtr(s.getSecid());
+            var stop = StopRules.of(s.getCostPrice(), s.getStopPct(), etf, atr);
+            if (stop != null) {
+                row.setStopPct(stop.stopPct());
+                row.setStopLine(stop.stopLine());
+                row.setStopSource(stop.source());
+                row.setStopSourceLabel(StopRules.sourceLabel(stop.source()));
+                row.setManualStopPct(s.getStopPct());
+                if (row.getPrice() != null) {
+                    row.setStopBroken(row.getPrice() < stop.stopLine());
+                    row.setStopDistancePct(round2((row.getPrice() - stop.stopLine()) / stop.stopLine() * 100));
+                }
             }
         }
         try {
@@ -678,7 +806,20 @@ public class WatchlistService {
                 .orElse(suggests.get(0));
     }
 
-    /** 纪律线幅度校验：空 = 用默认；否则限制在 0.5 ~ 90 之间 */
+    private Double lastAtr(String secid) {
+        if (secid == null || secid.isBlank()) {
+            return null;
+        }
+        List<KlineBar> bars = quoteClient.peekKline(secid);
+        if (bars.size() < StopRules.ATR_PERIOD + 1) {
+            return null;
+        }
+        double[] atr = IndicatorEngine.atr(bars, StopRules.ATR_PERIOD);
+        double last = atr[atr.length - 1];
+        return Double.isNaN(last) || last <= 0 ? null : last;
+    }
+
+    /** 纪律线幅度校验：空 = 用 ATR / 默认%；否则限制在 0.5 ~ 90 之间 */
     private static Double normalizeStopPct(Double pct) {
         if (pct == null) {
             return null;
@@ -687,6 +828,17 @@ public class WatchlistService {
             throw new IllegalArgumentException("纪律线幅度需在 0.5 ~ 90 之间（填 8 表示 -8%）");
         }
         return pct;
+    }
+
+    /** 类别解析：显式传 STOCK/ETF 用之，否则按代码自动识别 */
+    private static String resolveAssetType(WatchSaveRequest req, String code) {
+        if (req != null && req.getAssetType() != null && !req.getAssetType().isBlank()) {
+            String v = req.getAssetType().trim().toUpperCase();
+            if (v.equals("ETF") || v.equals("STOCK")) {
+                return v;
+            }
+        }
+        return isEtfCode(code) ? "ETF" : "STOCK";
     }
 
     private static double round2(double v) {

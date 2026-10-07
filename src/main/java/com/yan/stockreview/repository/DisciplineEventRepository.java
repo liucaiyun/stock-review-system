@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 
 public interface DisciplineEventRepository extends JpaRepository<DisciplineEvent, Long> {
     Optional<DisciplineEvent> findFirstByCodeAndStatusOrderByIdDesc(String code, String status);
+    Optional<DisciplineEvent> findFirstByCodeOrderByIdDesc(String code);
     List<DisciplineEvent> findByStatusOrderByTriggerDateDesc(String status);
     List<DisciplineEvent> findAllByOrderByTriggerDateDescIdDesc();
     long countByStatus(String status);

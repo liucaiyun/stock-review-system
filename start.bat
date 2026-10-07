@@ -49,8 +49,12 @@ echo Maven: %MVN_CMD%
 echo Port : 8088
 echo.
 
-if not exist "%JAR%" (
-  echo JAR not found, building...
+rem 不能只判断「文件存在」：如果上次打包被打断，target 里可能留下一个没有依赖的瘦 jar（几百 KB），
+rem 用 java -jar 跑会直接报 "no main manifest attribute"。所以要求文件大于 10MB 才认为可用。
+set "JAR_OK="
+if exist "%JAR%" for %%A in ("%JAR%") do if %%~zA GTR 10485760 set "JAR_OK=1"
+if not defined JAR_OK (
+  echo JAR missing or incomplete, building...
   call "%MVN_CMD%" -DskipTests package
   if errorlevel 1 (
     echo [ERROR] Build failed.

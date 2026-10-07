@@ -27,14 +27,16 @@ public class AlertService {
 
     public Map<String, Object> alerts() {
         List<Map<String, Object>> items = new ArrayList<>();
-        // 1. 持仓破 -8% 纪律线
+        // 1. 持仓破纪律线（ATR / 手填 / 默认%，不要写死 -8%）
         try {
             PositionOverview overview = watchlistService.positionOverviewLocal();
             for (PositionRow row : overview.getItems()) {
                 if (Boolean.TRUE.equals(row.getStopBroken())) {
+                    String src = row.getStopSourceLabel() == null ? "纪律线" : row.getStopSourceLabel();
                     items.add(alert("DISCIPLINE", row.getCode(), row.getName(),
                             (row.getName() == null ? row.getCode() : row.getName())
-                                    + " 已跌破 -8% 纪律线（现价 " + row.getPrice() + "，纪律线 " + row.getStopLine() + "）",
+                                    + " 已跌破" + src + "（现价 " + row.getPrice()
+                                    + "，线 " + row.getStopLine() + "）",
                             "position", "bad"));
                 }
             }

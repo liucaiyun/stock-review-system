@@ -57,9 +57,10 @@ async function del(url) {
 
 function toast(msg, type) {
   const box = document.getElementById('toastContainer');
+  if (!box) return;
   const el = document.createElement('div');
   el.className = 'toast ' + (type || 'info');
-  el.textContent = msg;
+  el.textContent = msg == null ? '操作失败' : String(msg);
   box.appendChild(el);
   setTimeout(() => el.remove(), 3200);
   el.onclick = () => el.remove();

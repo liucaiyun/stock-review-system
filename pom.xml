@@ -23,6 +23,9 @@
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!-- 产物名可覆盖：应用正在跑的时候正式名的 jar 会被占用（Windows 不允许重命名被打开的文件），
+             这时用 mvn package -Dfinal-name=srs-fat 先生成旁路产物，再覆盖回去。 -->
+        <final-name>stock-review-system-1.0.0</final-name>
     </properties>
 
     <dependencies>
@@ -43,13 +46,32 @@
             <groupId>com.github.ben-manes.caffeine</groupId>
             <artifactId>caffeine</artifactId>
         </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- XXL-Job 执行器：接入自建调度中心，定时刷新自选现价 -->
+        <dependency>
+            <groupId>com.xuxueli</groupId>
+            <artifactId>xxl-job-core</artifactId>
+            <version>2.4.1</version>
+        </dependency>
     </dependencies>
 
     <build>
+        <finalName>${final-name}</finalName>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <argLine>-Djdk.net.URLClassPath.disableClassPathURLCheck=true</argLine>
+                </configuration>
             </plugin>
         </plugins>
     </build>

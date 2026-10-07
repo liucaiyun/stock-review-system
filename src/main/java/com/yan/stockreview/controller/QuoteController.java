@@ -41,9 +41,20 @@ public class QuoteController {
         return strategyService.analyze(code, limit, strategies, asOf);
     }
 
+    /** 样本外验证（walk-forward）+ 参数敏感性。fill=true 时按自选补拉日 K 再跑。 */
+    @GetMapping("/strategy/walk-forward")
+    public Map<String, Object> walkForward(@RequestParam(defaultValue = "false") boolean fill) {
+        return strategyService.walkForward(fill);
+    }
+
     @GetMapping("/today/digest")
     public Map<String, Object> todayDigest() {
         return strategyService.todayDigest();
+    }
+
+    @GetMapping("/today/environment")
+    public Map<String, Object> environment() {
+        return strategyService.environment();
     }
 
     @GetMapping("/strategy/watchlist-signals")

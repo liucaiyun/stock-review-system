@@ -11,3 +11,6 @@ logs/
 Thumbs.db
 .dump/
 .workbuddy/
+tools/out/
+tools/backtest-audit-data/
+tools/pool-data/

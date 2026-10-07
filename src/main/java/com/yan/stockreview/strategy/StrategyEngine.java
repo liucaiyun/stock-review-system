@@ -1,11 +1,14 @@
 package com.yan.stockreview.strategy;
 
 import com.yan.stockreview.dto.ChartOverlay;
+import com.yan.stockreview.dto.HorizonStats;
 import com.yan.stockreview.dto.KlineBar;
 import com.yan.stockreview.dto.ScenarioCard;
 import com.yan.stockreview.dto.SignalPoint;
+import com.yan.stockreview.dto.SimTrade;
 import com.yan.stockreview.dto.StrategyLesson;
 import com.yan.stockreview.dto.StrategyStats;
+import com.yan.stockreview.dto.TradeStats;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -13,6 +16,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 
 /** 常见交易策略：金叉死叉、趋势、超买超卖、布林带、放量突破 */
 public class StrategyEngine {
@@ -44,11 +48,21 @@ public class StrategyEngine {
     public static final double DIVERGENCE_AMP_PCT = 8.0;
     public static final double DIVERGENCE_BODY_PCT = 2.0;
 
+    /** 次日开盘缺口 ≥ 9.5% 视为涨停开盘、买不到（主板 10%、创业板/科创板 20%、ST 5% 无法在此精确区分） */
+    public static final double LIMIT_UP_GAP = 0.095;
+    /** 少于这个样本数就不显示胜率，只显示「样本不足」 */
+    public static final int MIN_SAMPLES = 30;
+
     public AnalysisResult analyze(List<KlineBar> bars) {
-        return analyze(bars, NAMES.keySet());
+        return analyze(bars, NAMES.keySet(), null);
     }
 
     public AnalysisResult analyze(List<KlineBar> bars, Collection<String> selected) {
+        return analyze(bars, selected, null);
+    }
+
+    public AnalysisResult analyze(List<KlineBar> bars, Collection<String> selected,
+                                 Map<String, Double> benchCloses) {
         if (bars == null || bars.size() < 35) {
             throw new IllegalArgumentException("K线数据不足，至少需要约 35 根日线才能计算策略");
         }
@@ -196,22 +210,52 @@ public class StrategyEngine {
         indicators.put("volMa5", IndicatorEngine.boxed(volMa5));
         indicators.put("volMa20", IndicatorEngine.boxed(volMa20));
 
-        List<StrategyStats> stats = backtest(bars, signals, use);
+        BacktestOutcome outcome = backtestOutcome(bars, signals, use, benchCloses);
+        List<StrategyStats> stats = outcome.stats();
         List<StrategyLesson> lessons = buildLessons(use, bars, close, vol, ma5, ma10, ma20, ma60, volMa20,
                 rsi, macd, kdj, boll, signals, stats);
         Double lastMa20 = Double.isNaN(ma20[ma20.length - 1]) ? null : IndicatorEngine.round(ma20[ma20.length - 1], 3);
         ChartOverlay structure = ScenarioEngine.structure(bars, lastMa20);
         List<ScenarioCard> scenarios = ScenarioEngine.evaluate(bars, close, vol, ma20, volMa20);
         return new AnalysisResult(signals, indicators, stats, lessons, new ArrayList<>(use), structure, scenarios,
-                divergenceDays);
+                divergenceDays, outcome.trades());
     }
 
     public List<StrategyStats> backtest(List<KlineBar> bars, List<SignalPoint> signals) {
-        return backtest(bars, signals, NAMES.keySet());
+        return backtestOutcome(bars, signals, NAMES.keySet(), null).stats();
     }
 
     public List<StrategyStats> backtest(List<KlineBar> bars, List<SignalPoint> signals, Collection<String> selected) {
+        return backtestOutcome(bars, signals, selected, null).stats();
+    }
+
+    public List<StrategyStats> backtest(List<KlineBar> bars, List<SignalPoint> signals,
+                                        Collection<String> selected, Map<String, Double> benchCloses) {
+        return backtestOutcome(bars, signals, selected, benchCloses).stats();
+    }
+
+    /** 回测产物：分期限统计 + 每个策略的逐笔成交记录 */
+    public record BacktestOutcome(List<StrategyStats> stats, Map<String, List<SimTrade>> trades) {}
+
+    /**
+     * 逐信号回测。口径故意对自己不利，目的是别再高估：
+     * <ol>
+     *   <li>入场用「信号次日开盘价」——信号是用当日收盘价算出来的，按当日收盘价成交是乐观偏差（实测这批票
+     *       的买点次日开盘平均比信号日收盘高 0.12%）；</li>
+     *   <li>扣双边佣金（万2.5、最低5元）、过户费 0.001%、印花税 0.05%（仅卖出）、单边滑点 0.05%；</li>
+     *   <li>次日开盘就涨停（缺口 ≥ {@link #LIMIT_UP_GAP}）视为买不到，样本剔除；</li>
+     *   <li>SELL 信号<b>不做空</b>（A 股现货不能做空），只统计「信号后 N 日跌幅」用来衡量离场质量；</li>
+     *   <li>每个样本同时算同期沪深300 收益，所以能看超额而不只是绝对收益；</li>
+     *   <li>样本数 &lt; {@link #MIN_SAMPLES} 时标记 {@code insufficient}，前端不显示胜率。</li>
+     * </ol>
+     *
+     * @param benchCloses 沪深300 收盘价（日期 → 收盘），为 null 时只算绝对收益、不算超额
+     */
+    public BacktestOutcome backtestOutcome(List<KlineBar> bars, List<SignalPoint> signals,
+                                           Collection<String> selected, Map<String, Double> benchCloses) {
         Set<String> use = normalize(selected);
+        TreeMap<String, Double> bench = benchCloses == null || benchCloses.isEmpty()
+                ? null : new TreeMap<>(benchCloses);
         Map<String, List<SignalPoint>> grouped = new LinkedHashMap<>();
         for (String id : use) {
             grouped.put(id, new ArrayList<>());
@@ -226,55 +270,110 @@ public class StrategyEngine {
             dateIndex.put(bars.get(i).date(), i);
         }
         List<StrategyStats> list = new ArrayList<>();
+        Map<String, List<SimTrade>> tradesBy = new LinkedHashMap<>();
         for (Map.Entry<String, List<SignalPoint>> e : grouped.entrySet()) {
-            List<SignalPoint> pts = e.getValue().stream()
-                    .filter(p -> "BUY".equals(p.action()) || "SELL".equals(p.action()))
-                    .toList();
-            int buy = 0;
-            int sell = 0;
-            for (SignalPoint p : pts) {
-                if ("BUY".equals(p.action())) buy++;
-                else sell++;
+            List<SignalPoint> buys = new ArrayList<>();
+            List<SignalPoint> sells = new ArrayList<>();
+            for (SignalPoint p : e.getValue()) {
+                if ("BUY".equals(p.action())) {
+                    buys.add(p);
+                } else if ("SELL".equals(p.action())) {
+                    sells.add(p);
+                }
             }
-            Horizon h5 = eval(bars, dateIndex, pts, 5);
-            Horizon h10 = eval(bars, dateIndex, pts, 10);
-            Horizon h20 = eval(bars, dateIndex, pts, 20);
+            // 逐笔交易模拟：ATR 止损 + 保本 + 跟踪 + 时间 + 卖点出场，持仓期间不接新买点
+            List<SimTrade> trades = TradeSimulator.simulate(bars, e.getValue(), e.getKey(), benchCloses);
+            tradesBy.put(e.getKey(), trades);
             list.add(new StrategyStats(
                     e.getKey(), NAMES.getOrDefault(e.getKey(), e.getKey()),
-                    buy, sell, h5.count,
-                    h5.winRate, h5.avgReturn,
-                    h10.winRate, h10.avgReturn,
-                    h20.winRate, h20.avgReturn
+                    buys.size(), sells.size(),
+                    eval(bars, dateIndex, bench, buys, 5, true),
+                    eval(bars, dateIndex, bench, buys, 10, true),
+                    eval(bars, dateIndex, bench, buys, 20, true),
+                    eval(bars, dateIndex, bench, sells, 5, false),
+                    TradeStats.from(trades, TradeSimulator.MIN_TRADES)
             ));
         }
-        return list;
+        return new BacktestOutcome(list, tradesBy);
     }
 
-    private Horizon eval(List<KlineBar> bars, Map<String, Integer> dateIndex, List<SignalPoint> pts, int horizon) {
+    /**
+     * @param buySide true = 按买入交易口径（次日开盘入场、扣费、对比基准）；
+     *                false = 只统计卖出信号之后的跌幅（不做空、不计成本）
+     */
+    private HorizonStats eval(List<KlineBar> bars, Map<String, Integer> dateIndex, TreeMap<String, Double> bench,
+                              List<SignalPoint> pts, int horizon, boolean buySide) {
         int count = 0;
         int win = 0;
-        double sum = 0;
+        double netSum = 0;
+        double grossSum = 0;
+        double benchSum = 0;
+        int benchN = 0;
         for (SignalPoint p : pts) {
             Integer i = dateIndex.get(p.date());
-            if (i == null || i + horizon >= bars.size()) {
+            if (i == null || i + horizon >= bars.size() || i + 1 >= bars.size()) {
                 continue;
             }
-            double ret = (bars.get(i + horizon).close() - p.price()) / p.price();
-            if ("SELL".equals(p.action())) {
-                ret = -ret;
+            double nextOpen = bars.get(i + 1).open();
+            double exitClose = bars.get(i + horizon).close();
+            if (!(nextOpen > 0) || !(exitClose > 0)) {
+                continue; // 停牌或数据缺失：成交不了
             }
+            if (!buySide) {
+                // 卖出信号：从「次日开盘能真正卖出」算起，之后 N 日的跌幅。正数 = 卖对了。
+                double drop = (nextOpen - exitClose) / nextOpen;
+                count++;
+                netSum += drop;
+                if (drop > 0) {
+                    win++;
+                }
+                continue;
+            }
+            double gap = nextOpen / bars.get(i).close() - 1;
+            if (gap >= LIMIT_UP_GAP) {
+                continue; // 开盘涨停买不到
+            }
+            double net = TradeCost.roundTripNetReturn(TradeCost.buyPrice(nextOpen), TradeCost.sellPrice(exitClose));
+            double gross = (exitClose - p.price()) / p.price(); // 旧口径对照：信号日收盘入场、零成本
             count++;
-            sum += ret;
-            if (ret > 0) {
+            netSum += net;
+            grossSum += gross;
+            if (net > 0) {
                 win++;
+            }
+            Double benchRet = benchReturn(bench, bars.get(i).date(), bars.get(i + horizon).date());
+            if (benchRet != null) {
+                benchSum += benchRet;
+                benchN++;
             }
         }
         if (count == 0) {
-            return new Horizon(0, null, null);
+            return HorizonStats.empty();
         }
-        return new Horizon(count,
+        Double netAvg = IndicatorEngine.round(netSum / count * 100, 2);
+        Double benchAvg = benchN == 0 ? null : IndicatorEngine.round(benchSum / benchN * 100, 2);
+        return new HorizonStats(
+                count,
+                count < MIN_SAMPLES,
                 IndicatorEngine.round(win * 100.0 / count, 1),
-                IndicatorEngine.round(sum / count * 100, 2));
+                netAvg,
+                buySide ? IndicatorEngine.round(grossSum / count * 100, 2) : null,
+                buySide ? benchAvg : null,
+                buySide && benchAvg != null ? IndicatorEngine.round(netAvg - benchAvg, 2) : null
+        );
+    }
+
+    /** 沪深300 从 fromDate 收盘到 toDate 收盘的涨跌幅；取不到返回 null */
+    private static Double benchReturn(TreeMap<String, Double> bench, String fromDate, String toDate) {
+        if (bench == null) {
+            return null;
+        }
+        Map.Entry<String, Double> from = bench.floorEntry(fromDate);
+        Map.Entry<String, Double> to = bench.floorEntry(toDate);
+        if (from == null || to == null || !(from.getValue() > 0)) {
+            return null;
+        }
+        return to.getValue() / from.getValue() - 1;
     }
 
     private static SignalPoint sig(String date, String strategy, String action, String reason, double price) {
@@ -660,8 +759,6 @@ public class StrategyEngine {
         }
     }
 
-    private record Horizon(int count, Double winRate, Double avgReturn) {}
-
     public record AnalysisResult(
             List<SignalPoint> signals,
             Map<String, Object> indicators,
@@ -670,6 +767,8 @@ public class StrategyEngine {
             List<String> selected,
             ChartOverlay overlay,
             List<ScenarioCard> scenarios,
-            List<String> divergenceDays
+            List<String> divergenceDays,
+            /** 策略 id → 该策略的逐笔成交记录（按时间顺序） */
+            Map<String, List<SimTrade>> simTrades
     ) {}
 }

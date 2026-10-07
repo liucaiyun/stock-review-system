@@ -52,6 +52,12 @@ public class TradePlanController {
         return tradePlanService.close(id, note);
     }
 
+    /** 把一笔已录入的买入成交挂到这条计划上（完成「计划 → 成交」闭环） */
+    @PostMapping("/{id}/attach-trade")
+    public TradePlan attachTrade(@PathVariable Long id, @RequestParam Long tradeId) {
+        return tradePlanService.attachTrade(id, tradeId);
+    }
+
     @PostMapping("/close-code")
     public TradePlan closeByCode(@RequestParam String code,
                                  @RequestBody(required = false) Map<String, String> body) {

@@ -105,8 +105,37 @@ public final class IndicatorEngine {
         return new KdjSeries(k, d, j);
     }
 
-    public static BollSeries boll(double[] close, int period, double k) {
-        double[] mid = sma(close, period);
+    /**
+     * 平均真实波幅 ATR（Wilder 平滑）。
+     * TR = max(高−低, |高−昨收|, |低−昨收|)；前 period 根取简单平均，之后 ATR[i]=(ATR[i-1]×(period−1)+TR[i])/period。
+     * 用于「止损距离」和仓位规模：同样 −8%，对银行股是 4 个 ATR、对题材股只有 1 个 ATR。
+     */
+    public static double[] atr(List<KlineBar> bars, int period) {
+        int len = bars.size();
+        double[] out = new double[len];
+        double[] tr = new double[len];
+        for (int i = 0; i < len; i++) {
+            KlineBar b = bars.get(i);
+            double prevClose = i == 0 ? b.close() : bars.get(i - 1).close();
+            tr[i] = Math.max(b.high() - b.low(),
+                    Math.max(Math.abs(b.high() - prevClose), Math.abs(b.low() - prevClose)));
+        }
+        double sum = 0;
+        for (int i = 0; i < len; i++) {
+            if (i < period - 1) {
+                sum += tr[i];
+                out[i] = Double.NaN;
+            } else if (i == period - 1) {
+                sum += tr[i];
+                out[i] = sum / period;
+            } else {
+                out[i] = (out[i - 1] * (period - 1) + tr[i]) / period;
+            }
+        }
+        return out;
+    }
+
+    public static BollSeries boll(double[] close, int period, double k) {        double[] mid = sma(close, period);
         double[] up = new double[close.length];
         double[] dn = new double[close.length];
         for (int i = 0; i < close.length; i++) {

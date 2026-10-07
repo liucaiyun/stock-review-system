@@ -40,8 +40,11 @@ public class WatchStock {
     private Double costPrice;
     /** 成本金额 = 份额 × 成本价 */
     private Double costAmount;
-    /** 个性化纪律线幅度（百分比，如 8 表示 -8%）。null = 用默认 -8% */
+    /** 个性化纪律线幅度（百分比，如 8 表示 -8%）。null = 按类别用默认（个股 -8%，ETF -12%） */
     private Double stopPct;
+    /** 资产类别：STOCK=个股 / ETF=基金。null = 按代码自动识别 */
+    @Column(length = 8)
+    private String assetType;
 
     private Integer sortOrder;
 
@@ -82,6 +85,8 @@ public class WatchStock {
     public void setCostAmount(Double costAmount) { this.costAmount = costAmount; }
     public Double getStopPct() { return stopPct; }
     public void setStopPct(Double stopPct) { this.stopPct = stopPct; }
+    public String getAssetType() { return assetType; }
+    public void setAssetType(String assetType) { this.assetType = assetType; }
     public Integer getSortOrder() { return sortOrder; }
     public void setSortOrder(Integer sortOrder) { this.sortOrder = sortOrder; }
     public LocalDateTime getCreatedAt() { return createdAt; }
